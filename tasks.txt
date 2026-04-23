@@ -1,0 +1,8 @@
+# Each non-empty, non-comment line is one step for the agent.
+# Lines starting with '#' are ignored.
+# Example task: open a text editor and type a greeting.
+
+Press the Windows key to open the Start menu
+Type "notepad" to search for Notepad
+Press Enter to open Notepad
+Type "Hello from the Desktop VLM Agent!"

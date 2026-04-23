@@ -9,9 +9,10 @@ from __future__ import annotations
 import io
 import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-import pyautogui
-from PIL import Image
+if TYPE_CHECKING:
+    from PIL import Image
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +47,8 @@ class ScreenGeometry:
 
 def detect_geometry() -> ScreenGeometry:
     """Detect the primary monitor's native resolution via pyautogui."""
+    import pyautogui  # lazy: requires a display server
+
     size = pyautogui.size()
     geom = ScreenGeometry(width=int(size.width), height=int(size.height))
     log.info("Detected screen geometry: %dx%d", geom.width, geom.height)
@@ -54,6 +57,8 @@ def detect_geometry() -> ScreenGeometry:
 
 def capture_screenshot() -> Image.Image:
     """Capture the primary monitor as a PIL image."""
+    import pyautogui  # lazy: requires a display server
+
     return pyautogui.screenshot()
 
 

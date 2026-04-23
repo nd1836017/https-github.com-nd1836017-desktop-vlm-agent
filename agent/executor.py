@@ -4,16 +4,19 @@ from __future__ import annotations
 import logging
 import time
 
-import pyautogui
-
 from .parser import ClickCommand, Command, PressCommand, TypeCommand
 from .screen import ScreenGeometry
 
 log = logging.getLogger(__name__)
 
 
-# Required by spec.
-pyautogui.FAILSAFE = True
+def _pyautogui():
+    """Lazy import so tests and non-desktop contexts don't need a display."""
+    import pyautogui
+
+    # Required by spec. Safe to set every call — the flag is module-global.
+    pyautogui.FAILSAFE = True
+    return pyautogui
 
 
 # Keys that trigger OS-level UI animations and require a longer post-action buffer.
@@ -35,6 +38,8 @@ def execute(
     animation_buffer_seconds: float = 1.5,
 ) -> None:
     """Execute a parsed command and sleep the animation buffer when required."""
+    pyautogui = _pyautogui()
+
     if isinstance(cmd, ClickCommand):
         px, py = geometry.to_pixels(cmd.x, cmd.y)
         log.info(

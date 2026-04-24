@@ -29,6 +29,7 @@ class Config:
     gemini_retry_max_attempts: int
     gemini_retry_base_delay_seconds: float
     gemini_retry_max_delay_seconds: float
+    log_redact_type: bool
     log_level: str
 
     @classmethod
@@ -66,6 +67,7 @@ class Config:
             gemini_retry_max_delay_seconds=float(
                 os.getenv("GEMINI_RETRY_MAX_DELAY_SECONDS", "300.0")
             ),
+            log_redact_type=_env_bool("LOG_REDACT_TYPE", default=True),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         )
 

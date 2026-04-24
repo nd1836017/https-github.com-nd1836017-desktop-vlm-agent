@@ -5,10 +5,26 @@ import logging
 import random
 import time
 
-from .parser import ClickCommand, Command, PressCommand, TypeCommand
+from .parser import (
+    ClickCommand,
+    Command,
+    DoubleClickCommand,
+    DragCommand,
+    MoveToCommand,
+    PressCommand,
+    RightClickCommand,
+    ScrollCommand,
+    TypeCommand,
+    WaitCommand,
+)
 from .screen import ScreenGeometry
 
 log = logging.getLogger(__name__)
+
+
+# Safety cap on WAIT values — a hallucinated `WAIT [9999]` should not
+# freeze the agent for hours.
+WAIT_MAX_SECONDS = 60.0
 
 
 def _pyautogui():
@@ -99,6 +115,7 @@ def execute(
     click_max_delay_seconds: float = 0.0,
     type_min_interval_seconds: float = 0.02,
     type_max_interval_seconds: float = 0.02,
+    log_redact_type: bool = True,
 ) -> None:
     """Execute a parsed command and sleep the animation buffer when required."""
     pyautogui = _pyautogui()
@@ -111,6 +128,81 @@ def execute(
         )
         pyautogui.click(px, py)
         time.sleep(animation_buffer_seconds)
+        return
+
+    if isinstance(cmd, DoubleClickCommand):
+        px, py = geometry.to_pixels(cmd.x, cmd.y)
+        _human_pre_click_delay(click_min_delay_seconds, click_max_delay_seconds)
+        log.info(
+            "DOUBLE_CLICK normalized=(%d,%d) -> pixels=(%d,%d)",
+            cmd.x,
+            cmd.y,
+            px,
+            py,
+        )
+        pyautogui.doubleClick(px, py)
+        time.sleep(animation_buffer_seconds)
+        return
+
+    if isinstance(cmd, RightClickCommand):
+        px, py = geometry.to_pixels(cmd.x, cmd.y)
+        _human_pre_click_delay(click_min_delay_seconds, click_max_delay_seconds)
+        log.info(
+            "RIGHT_CLICK normalized=(%d,%d) -> pixels=(%d,%d)",
+            cmd.x,
+            cmd.y,
+            px,
+            py,
+        )
+        pyautogui.rightClick(px, py)
+        time.sleep(animation_buffer_seconds)
+        return
+
+    if isinstance(cmd, MoveToCommand):
+        px, py = geometry.to_pixels(cmd.x, cmd.y)
+        log.info(
+            "MOVE_TO normalized=(%d,%d) -> pixels=(%d,%d)", cmd.x, cmd.y, px, py
+        )
+        pyautogui.moveTo(px, py, duration=0.2)
+        # Short settle so hover-triggered tooltips/menus can render before the
+        # next screenshot is taken.
+        time.sleep(0.5)
+        return
+
+    if isinstance(cmd, ScrollCommand):
+        # pyautogui.scroll: positive = up, negative = down.
+        amount = abs(int(cmd.amount))
+        direction = cmd.direction.lower()
+        clicks = amount if direction == "up" else -amount
+        log.info("SCROLL direction=%s amount=%d (clicks=%d)", direction, amount, clicks)
+        pyautogui.scroll(clicks)
+        time.sleep(0.5)
+        return
+
+    if isinstance(cmd, DragCommand):
+        px1, py1 = geometry.to_pixels(cmd.x1, cmd.y1)
+        px2, py2 = geometry.to_pixels(cmd.x2, cmd.y2)
+        _human_pre_click_delay(click_min_delay_seconds, click_max_delay_seconds)
+        log.info(
+            "DRAG normalized=(%d,%d)->(%d,%d) pixels=(%d,%d)->(%d,%d)",
+            cmd.x1,
+            cmd.y1,
+            cmd.x2,
+            cmd.y2,
+            px1,
+            py1,
+            px2,
+            py2,
+        )
+        pyautogui.moveTo(px1, py1, duration=0.2)
+        pyautogui.dragTo(px2, py2, duration=0.5, button="left")
+        time.sleep(animation_buffer_seconds)
+        return
+
+    if isinstance(cmd, WaitCommand):
+        seconds = max(0.0, min(float(cmd.seconds), WAIT_MAX_SECONDS))
+        log.info("WAIT %.2fs", seconds)
+        time.sleep(seconds)
         return
 
     if isinstance(cmd, PressCommand):
@@ -129,7 +221,10 @@ def execute(
         return
 
     if isinstance(cmd, TypeCommand):
-        log.info("TYPE %r", cmd.text)
+        if log_redact_type:
+            log.info("TYPE <REDACTED, %d chars>", len(cmd.text))
+        else:
+            log.info("TYPE %r", cmd.text)
         # Per-character jittered interval to avoid perfectly-uniform typing
         # cadence that is trivial for bot detectors to flag. pyautogui's
         # typewrite only accepts a fixed interval, so we loop ourselves.

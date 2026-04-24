@@ -98,6 +98,7 @@ def _cfg(tmp_path, tasks_text: str, **overrides) -> Config:
         gemini_retry_max_attempts=1,
         gemini_retry_base_delay_seconds=0.0,
         gemini_retry_max_delay_seconds=0.0,
+        log_redact_type=True,
         log_level="INFO",
     )
     defaults.update(overrides)

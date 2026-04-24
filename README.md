@@ -127,10 +127,30 @@ The VLM is instructed to respond with exactly one of:
 | Command | Example | Meaning |
 | --- | --- | --- |
 | `CLICK [X,Y]` | `CLICK [500,250]` | Left-click at normalized (0–1000) coordinates. |
+| `DOUBLE_CLICK [X,Y]` | `DOUBLE_CLICK [400,400]` | Double-click (open files/folders). |
+| `RIGHT_CLICK [X,Y]` | `RIGHT_CLICK [700,300]` | Right-click (context menu). |
+| `MOVE_TO [X,Y]` | `MOVE_TO [500,500]` | Move mouse without clicking (hover tooltips/menus). |
 | `PRESS [KEY]` | `PRESS [win]`, `PRESS [ctrl+c]` | Press a single key or `+`-separated hotkey. |
-| `TYPE [TEXT]` | `TYPE [hello world]` | Type literal text. |
+| `TYPE [TEXT]` | `TYPE [hello world]` | Type literal text (logs are redacted by default — see `LOG_REDACT_TYPE`). |
+| `SCROLL [DIR, AMOUNT]` | `SCROLL [down, 5]` | Scroll the active window up or down by N wheel clicks. |
+| `DRAG [X1,Y1,X2,Y2]` | `DRAG [100,200,500,600]` | Press at (X1,Y1), drag to (X2,Y2), release. |
+| `WAIT [SECONDS]` | `WAIT [2.5]` | Sleep `SECONDS` before the next step (capped at 60s). |
 
-The parser is lenient: it will still recover if the VLM omits brackets, wraps the command in prose, or uses parentheses instead of brackets.
+The parser is lenient: it will still recover if the VLM omits brackets, wraps the command in prose, or uses parentheses instead of brackets. The legacy `CLICK`, `PRESS`, and `TYPE` paths are unchanged.
+
+## Persistent browser profile
+
+Google's "Verify it's you" device-trust challenge fires on every *new* browser, so log it in once and keep the profile around. `scripts/launch-chrome.sh` launches Chrome with a user-data-dir that survives across agent runs:
+
+```bash
+# First run: will prompt for password + device verification.
+./scripts/launch-chrome.sh https://accounts.google.com
+
+# Subsequent runs: reuse the same profile, skip the device challenge.
+PROFILE_DIR=~/my-agent-profile ./scripts/launch-chrome.sh https://youtube.com
+```
+
+The agent itself does not launch the browser — this helper just pairs a persistent profile with whatever Chrome-family binary is on your PATH (`google-chrome`, `chromium`, etc.).
 
 ## Safety notes
 

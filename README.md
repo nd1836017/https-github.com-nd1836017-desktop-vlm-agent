@@ -1,6 +1,6 @@
 # Desktop VLM Agent
 
-A Python desktop automation agent that uses **Gemini 2.0 Flash** (a Vision-Language Model) as its "brain" to interact with the OS. It reads step-by-step natural-language instructions from `tasks.txt`, captures screenshots, asks the VLM what to do, parses a command from the response, executes it with `pyautogui`, and verifies the outcome with a second VLM call.
+A Python desktop automation agent that uses a **Gemini Flash** VLM as its "brain" to interact with the OS. It reads step-by-step natural-language instructions from `tasks.txt`, captures screenshots, asks the VLM what to do, parses a command from the response, executes it with `pyautogui`, and verifies the outcome with a second VLM call.
 
 ## Features
 
@@ -9,7 +9,10 @@ A Python desktop automation agent that uses **Gemini 2.0 Flash** (a Vision-Langu
 - **Scaling correction** — VLM emits coordinates on a normalized 0–1000 grid; the agent auto-detects the native screen resolution and maps to pixels.
 - **Animation buffer** — a mandatory `time.sleep(1.5)` after any `CLICK` or `PRESS [win]` so OS UI animations can finish before the next screenshot.
 - **Regex-protected parsing** — tolerates conversational text and common bracket omissions; if a command cannot be parsed, the step is retried once.
-- **Verification + halt** — after every action, a second VLM call checks that the screen state matches the goal; if not, execution halts and the user is notified via the terminal.
+- **Short-term memory** — a rolling window of recent `(step, action, verdict)` records is fed back into each plan prompt so the VLM can reason about what has already happened. Tunable via `HISTORY_WINDOW`.
+- **Replan-on-failure with budget** — when the verifier reports FAIL, the agent tells the VLM what went wrong and asks for a different action, up to `MAX_REPLANS_PER_STEP` times before halting. Avoids both premature halts and runaway retry loops.
+- **Checkpoint + resume** — after every verified step the progress is atomically written to a JSON state file. Long runs can be resumed from the last successful step with `python -m agent --resume`.
+- **Verification + halt** — after every action, a second VLM call checks that the screen state matches the goal; if the replan budget is exhausted, execution halts and the user is notified via the terminal.
 - **Failsafe** — `pyautogui.FAILSAFE = True` (move the mouse to a screen corner to abort).
 
 ## Architecture
@@ -71,7 +74,10 @@ Env vars (all optional except `GEMINI_API_KEY`):
 | `GEMINI_MODEL` | `gemini-3.1-flash-lite-preview` | Any Gemini vision-capable model (e.g. `gemini-3.1-flash-lite-preview`, `gemini-2.5-flash-lite`, `gemini-2.5-flash`). Lite = cheaper + higher free-tier quota. |
 | `TASKS_FILE` | `tasks.txt` | Path to the instructions file. |
 | `ANIMATION_BUFFER_SECONDS` | `1.5` | Sleep after CLICK / PRESS [win]. |
-| `MAX_STEP_RETRIES` | `1` | Retries per step on parse failure. |
+| `MAX_STEP_RETRIES` | `1` | Retries per attempt on unparseable VLM responses. |
+| `MAX_REPLANS_PER_STEP` | `2` | Replan attempts after a verifier FAIL before halting. |
+| `HISTORY_WINDOW` | `5` | Number of recent steps fed back to the VLM as short-term memory (0 = disabled). |
+| `STATE_FILE` | `.agent_state.json` | Checkpoint file written atomically after each verified step. |
 | `LOG_LEVEL` | `INFO` | Standard Python logging level. |
 
 ## Write a task file
@@ -88,10 +94,12 @@ Type "Hello from the Desktop VLM Agent!"
 ## Run
 
 ```bash
-python -m agent
+python -m agent                # normal run, starts from step 1
+python -m agent --resume       # continue from the last verified step
+python -m agent --reset        # delete the checkpoint before running
 ```
 
-Logs go to stdout. On verification failure, the agent halts with a non-zero exit code and prints the reason.
+Logs go to stdout. On verification failure after the replan budget is exhausted, the agent halts with exit code 1, prints the reason, and suggests `--resume` so you can continue after fixing the blocker.
 
 **Abort at any time** by slamming your mouse into any corner of the screen — that triggers `pyautogui`'s failsafe.
 

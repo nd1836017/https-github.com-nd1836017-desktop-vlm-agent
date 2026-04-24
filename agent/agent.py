@@ -1,4 +1,13 @@
-"""Main agent loop: tasks.txt -> VLM -> parse -> execute -> verify."""
+"""Main agent loop: tasks.txt -> VLM -> parse -> execute -> verify.
+
+Includes:
+- Rolling short-term memory of recent (step, action, verdict) records,
+  injected into each plan prompt.
+- Replan-on-failure: when a verifier returns FAIL, the agent replans with
+  the failure reason, up to `max_replans_per_step` times before halting.
+- Checkpoint + resume: after each verified step the progress is saved to
+  a JSON state file so a long run can be resumed after a crash/abort.
+"""
 from __future__ import annotations
 
 import logging
@@ -7,8 +16,10 @@ from pathlib import Path
 
 from .config import Config
 from .executor import execute
+from .history import History, render_command
 from .parser import parse_command
 from .screen import ScreenGeometry, capture_screenshot, detect_geometry
+from .state import AgentState, load_state, save_state
 from .vlm import GeminiClient, VerificationResult
 
 log = logging.getLogger(__name__)
@@ -30,57 +41,173 @@ def read_tasks(path: Path) -> list[str]:
     return steps
 
 
-def run_step(
+def _attempt_step(
     step: str,
     vlm: GeminiClient,
     geometry: ScreenGeometry,
     animation_buffer: float,
-    max_retries: int,
-) -> VerificationResult:
-    """Run one step, retrying up to `max_retries` times on parse failure."""
-    attempts = 0
-    last_error: str = ""
-    while attempts <= max_retries:
-        attempts += 1
-        log.info("Step attempt %d/%d: %s", attempts, max_retries + 1, step)
+    max_parse_retries: int,
+    history_summary: str,
+    previous_failure: str,
+) -> tuple[VerificationResult, str]:
+    """Run one plan/execute/verify attempt and return (verdict, action_text).
 
+    Handles parse-failure retry internally. `action_text` is the rendered
+    command that was executed, or a synthetic marker if we never got a
+    parseable command.
+    """
+    attempts = 0
+    last_parse_error = ""
+    while attempts <= max_parse_retries:
+        attempts += 1
         screenshot = capture_screenshot()
-        raw = vlm.plan_action(step, screenshot)
+        raw = vlm.plan_action(
+            step,
+            screenshot,
+            history_summary=history_summary,
+            previous_failure=previous_failure,
+        )
         cmd = parse_command(raw)
         if cmd is None:
-            last_error = f"Could not parse VLM response: {raw!r}"
-            log.warning("%s — retrying" if attempts <= max_retries else "%s", last_error)
+            last_parse_error = f"Could not parse VLM response: {raw!r}"
+            log.warning(
+                "%s — %s",
+                last_parse_error,
+                "retrying" if attempts <= max_parse_retries else "giving up",
+            )
             continue
 
+        action_text = render_command(cmd)
+        log.info("Action: %s", action_text)
         execute(cmd, geometry, animation_buffer_seconds=animation_buffer)
 
         post_screenshot = capture_screenshot()
         verdict = vlm.verify(step, post_screenshot)
         log.info("Verify: %s", verdict.reason)
-        return verdict
+        return verdict, action_text
 
-    # Exhausted retries without a parseable command.
-    return VerificationResult(
-        passed=False,
-        reason=f"Parse failure after {max_retries + 1} attempts: {last_error}",
+    return (
+        VerificationResult(
+            passed=False,
+            reason=f"Parse failure after {max_parse_retries + 1} attempts: {last_parse_error}",
+        ),
+        "<parse-failed>",
     )
 
 
-def run(config: Config) -> int:
+def run_step(
+    step: str,
+    vlm: GeminiClient,
+    geometry: ScreenGeometry,
+    animation_buffer: float,
+    max_parse_retries: int,
+    max_replans: int,
+    history: History,
+) -> VerificationResult:
+    """Run one step with up to `max_replans` replans on verify FAIL.
+
+    The plan/verify loop is:
+        attempt 1              -> if PASS, return
+                               -> if FAIL, replan #1
+        attempt 2 (replan #1)  -> if PASS, return
+                               -> if FAIL, replan #2
+        ...
+        after max_replans FAILs, return the final FAIL verdict.
+    """
+    total_attempts = max_replans + 1
+    previous_failure = ""
+    last_verdict: VerificationResult | None = None
+    last_action_text = "<no-action>"
+
+    for attempt_idx in range(1, total_attempts + 1):
+        log.info(
+            "Step attempt %d/%d (replan budget: %d remaining)",
+            attempt_idx,
+            total_attempts,
+            total_attempts - attempt_idx,
+        )
+
+        verdict, action_text = _attempt_step(
+            step=step,
+            vlm=vlm,
+            geometry=geometry,
+            animation_buffer=animation_buffer,
+            max_parse_retries=max_parse_retries,
+            history_summary=history.summary(),
+            previous_failure=previous_failure,
+        )
+        last_verdict = verdict
+        last_action_text = action_text
+
+        if verdict.passed:
+            history.record(step, action_text, passed=True, reason=verdict.reason)
+            return verdict
+
+        # FAIL — prepare for replan.
+        previous_failure = f"action `{action_text}` -> {verdict.reason}"
+        log.warning(
+            "Step verification failed on attempt %d/%d: %s",
+            attempt_idx,
+            total_attempts,
+            verdict.reason,
+        )
+
+    # Budget exhausted.
+    final = last_verdict or VerificationResult(
+        passed=False, reason="No attempts were made (internal error)."
+    )
+    history.record(step, last_action_text, passed=False, reason=final.reason)
+    return final
+
+
+def run(config: Config, resume: bool = False) -> int:
     steps = read_tasks(config.tasks_file)
     if not steps:
         log.error("No steps found in %s", config.tasks_file)
         return 2
+
+    # Checkpoint handling.
+    existing_state = load_state(config.state_file) if resume else None
+    start_idx = 1
+    if existing_state is not None:
+        if (
+            existing_state.tasks_file == str(config.tasks_file)
+            and existing_state.total_steps == len(steps)
+            and 0 <= existing_state.last_completed_step < len(steps)
+        ):
+            start_idx = existing_state.last_completed_step + 1
+            log.info(
+                "Resuming from checkpoint: step %d/%d (file=%s)",
+                start_idx,
+                len(steps),
+                config.state_file,
+            )
+            state = existing_state
+        else:
+            log.warning(
+                "Ignoring stale checkpoint at %s (tasks file or step count changed).",
+                config.state_file,
+            )
+            state = AgentState.initial(config.tasks_file, len(steps))
+    else:
+        state = AgentState.initial(config.tasks_file, len(steps))
 
     geometry = detect_geometry()
     vlm = GeminiClient(
         api_key=config.gemini_api_key,
         model_name=config.gemini_model,
     )
+    history = History(window=config.history_window)
 
-    log.info("Loaded %d step(s) from %s", len(steps), config.tasks_file)
+    log.info(
+        "Loaded %d step(s) from %s (starting at step %d)",
+        len(steps),
+        config.tasks_file,
+        start_idx,
+    )
 
-    for idx, step in enumerate(steps, start=1):
+    for idx in range(start_idx, len(steps) + 1):
+        step = steps[idx - 1]
         log.info("=" * 60)
         log.info("Step %d/%d: %s", idx, len(steps), step)
         log.info("=" * 60)
@@ -90,18 +217,29 @@ def run(config: Config) -> int:
             vlm=vlm,
             geometry=geometry,
             animation_buffer=config.animation_buffer_seconds,
-            max_retries=config.max_step_retries,
+            max_parse_retries=config.max_step_retries,
+            max_replans=config.max_replans_per_step,
+            history=history,
         )
 
         if not result.passed:
             msg = (
                 f"\n[!] HALT at step {idx}/{len(steps)}: {step}\n"
                 f"    Reason: {result.reason}\n"
+                f"    (Exhausted replan budget of {config.max_replans_per_step}.)\n"
+                f"    Run `python -m agent --resume` after fixing the blocker to continue.\n"
                 "    The agent has stopped to prevent runaway actions."
             )
             print(msg, file=sys.stderr)
             log.error("Halting execution: %s", result.reason)
             return 1
+
+        # Commit progress to disk before moving on.
+        state = state.advance()
+        try:
+            save_state(config.state_file, state)
+        except OSError as exc:
+            log.warning("Failed to save checkpoint to %s: %s", config.state_file, exc)
 
     log.info("All %d step(s) completed successfully.", len(steps))
     print(f"[ok] All {len(steps)} step(s) completed successfully.")

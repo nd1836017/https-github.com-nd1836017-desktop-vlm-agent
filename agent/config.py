@@ -19,6 +19,9 @@ class Config:
     max_replans_per_step: int
     history_window: int
     state_file: Path
+    enable_two_stage_click: bool
+    two_stage_crop_size_px: int
+    max_click_candidates: int
     log_level: str
 
     @classmethod
@@ -42,8 +45,18 @@ class Config:
             max_replans_per_step=int(os.getenv("MAX_REPLANS_PER_STEP", "2")),
             history_window=int(os.getenv("HISTORY_WINDOW", "5")),
             state_file=Path(os.getenv("STATE_FILE", ".agent_state.json")).expanduser(),
+            enable_two_stage_click=_env_bool("ENABLE_TWO_STAGE_CLICK", default=True),
+            two_stage_crop_size_px=int(os.getenv("TWO_STAGE_CROP_SIZE_PX", "300")),
+            max_click_candidates=int(os.getenv("MAX_CLICK_CANDIDATES", "5")),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         )
+
+
+def _env_bool(name: str, *, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def configure_logging(level: str) -> None:

@@ -5,6 +5,7 @@ Uses the modern `google-genai` SDK (`pip install google-genai`).
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 from google import genai
@@ -46,6 +47,36 @@ Do not include any other text.
 """
 
 
+REFINE_SYSTEM_PROMPT = """You are a refinement assistant for a desktop automation agent.
+
+You see a CROPPED region of the user's screen and a natural-language step describing what the agent wants to click.
+
+List every plausible click target in this crop that matches the step. For EACH target, output ONE line in the exact format:
+
+    CLICK [X,Y]
+
+where X and Y are integers in [0, 1000] on THIS CROP's own 0-1000 grid (not the full screen). (0,0) is the top-left of this crop. (1000,1000) is the bottom-right.
+
+Rules:
+- If NOTHING in this crop plausibly matches the step, respond with the single line: NONE
+- Do NOT output anything else — no prose, no numbering, no code fences.
+- Prefer precise centers of buttons/links/inputs over their edges.
+- If multiple things could match, list them all (at most 5).
+"""
+
+
+DISAMBIG_SYSTEM_PROMPT = """You are a disambiguation assistant for a desktop automation agent.
+
+You see a screenshot annotated with numbered red rectangles labeled 1, 2, 3, ... Each rectangle marks a candidate click target. You also see a natural-language step describing what the user wants to click.
+
+Pick the single number whose rectangle best matches the step. Respond with EXACTLY one line:
+
+    PICK [N]
+
+where N is the 1-based number of the best rectangle. If NONE of the rectangles matches, respond PICK [0]. Do not output anything else.
+"""
+
+
 @dataclass(frozen=True)
 class VerificationResult:
     passed: bool
@@ -61,6 +92,12 @@ class GeminiClient:
         )
         self._verify_config = types.GenerateContentConfig(
             system_instruction=VERIFY_SYSTEM_PROMPT,
+        )
+        self._refine_config = types.GenerateContentConfig(
+            system_instruction=REFINE_SYSTEM_PROMPT,
+        )
+        self._disambig_config = types.GenerateContentConfig(
+            system_instruction=DISAMBIG_SYSTEM_PROMPT,
         )
         log.info("Initialized Gemini client with model=%s", model_name)
 
@@ -126,3 +163,82 @@ class GeminiClient:
             passed=False,
             reason=f"Unparseable verification response: {text!r}",
         )
+
+    def refine_click(
+        self,
+        step: str,
+        crop: Image.Image,
+        max_candidates: int = 5,
+    ) -> list[tuple[int, int]]:
+        """Return candidate click points on the crop's own 0-1000 grid.
+
+        Returns an empty list when the VLM responds `NONE` (nothing in the
+        crop matches the step). Clamps the result to at most `max_candidates`.
+        """
+        prompt = (
+            f"Step: {step}\n\n"
+            "List plausible click targets on THIS CROP in 0-1000 coords, "
+            "one `CLICK [X,Y]` per line, or `NONE`."
+        )
+        response = self._client.models.generate_content(
+            model=self._model_name,
+            contents=[prompt, crop],
+            config=self._refine_config,
+        )
+        text = (response.text or "").strip()
+        log.debug("refine_click response: %r", text)
+
+        if not text or text.upper().startswith("NONE"):
+            return []
+
+        candidates: list[tuple[int, int]] = []
+        for line in text.splitlines():
+            # Primary bracketed form.
+            m = re.search(
+                r"CLICK\s*\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]",
+                line,
+                re.IGNORECASE,
+            )
+            if not m:
+                # Lenient: a bare `[x,y]` or `(x,y)` is also accepted.
+                m = re.search(
+                    r"[\[(]\s*(-?\d+)\s*,\s*(-?\d+)\s*[\])]", line
+                )
+            if m:
+                x = max(0, min(1000, int(m.group(1))))
+                y = max(0, min(1000, int(m.group(2))))
+                candidates.append((x, y))
+            if len(candidates) >= max_candidates:
+                break
+        return candidates
+
+    def disambiguate_candidates(
+        self,
+        step: str,
+        annotated_screenshot: Image.Image,
+        num_candidates: int,
+    ) -> int:
+        """Return the 1-based index of the best-matching candidate, or 0 if none match."""
+        prompt = (
+            f"Step: {step}\n\n"
+            f"Which of the {num_candidates} numbered red rectangles best "
+            "matches the step? Respond with `PICK [N]` only."
+        )
+        response = self._client.models.generate_content(
+            model=self._model_name,
+            contents=[prompt, annotated_screenshot],
+            config=self._disambig_config,
+        )
+        text = (response.text or "").strip()
+        log.debug("disambiguate response: %r", text)
+
+        m = re.search(r"PICK\s*\[\s*(-?\d+)\s*\]", text, re.IGNORECASE)
+        if not m:
+            # Last-resort: accept any standalone integer.
+            m = re.search(r"\b(\d+)\b", text)
+        if not m:
+            return 0
+        pick = int(m.group(1))
+        if pick < 0 or pick > num_candidates:
+            return 0
+        return pick

@@ -35,6 +35,10 @@ class ArtifactWriter:
     base_dir: Path = field(default_factory=lambda: Path("runs"))
     run_dir: Path | None = None
     _summary: list[dict] = field(default_factory=list)
+    # Remember the last action text seen for each step so `append_summary`
+    # can record what actually ran, even when the caller doesn't have it
+    # handy (the run-level `run()` only sees the verdict, not the action).
+    _last_action_by_step: dict[int, str] = field(default_factory=dict)
 
     @classmethod
     def create(cls, *, enabled: bool, base_dir: str | Path) -> ArtifactWriter:
@@ -74,6 +78,10 @@ class ArtifactWriter:
         self._write_image(f"step_{step_idx:03d}_after.png", screenshot)
 
     def save_plan(self, step_idx: int, raw_text: str, action_text: str) -> None:
+        # Stash the action text so append_summary() can use it without the
+        # run loop having to plumb it through. The latest call wins, which
+        # matches "what actually executed for this step".
+        self._last_action_by_step[step_idx] = action_text
         body = f"# action_text\n{action_text}\n\n# raw VLM response\n{raw_text}\n"
         self._write_text(f"step_{step_idx:03d}_plan.txt", body)
 
@@ -86,17 +94,30 @@ class ArtifactWriter:
         self,
         step_idx: int,
         step_text: str,
-        action_text: str,
         passed: bool,
         reason: str,
+        action_text: str | None = None,
     ) -> None:
+        """Append one step's outcome to the rolling summary.json.
+
+        If ``action_text`` is None, fall back to the last action seen for
+        this step via ``save_plan``. This lets the run loop call
+        ``append_summary`` without having to plumb action_text through
+        ``run_step``'s return value — the writer already saw it when the
+        plan was saved.
+        """
         if not self.enabled or self.run_dir is None:
             return
+        resolved_action = (
+            action_text
+            if action_text is not None
+            else self._last_action_by_step.get(step_idx, "<no-action-recorded>")
+        )
         self._summary.append(
             {
                 "step_idx": step_idx,
                 "step": step_text,
-                "action": action_text,
+                "action": resolved_action,
                 "passed": passed,
                 "reason": reason,
             }

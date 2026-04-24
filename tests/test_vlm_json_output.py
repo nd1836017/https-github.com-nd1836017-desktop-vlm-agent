@@ -1,6 +1,11 @@
 """Tests for the JSON-schema path of plan_action / verify."""
 from __future__ import annotations
 
+from unittest import mock
+
+import pytest
+from PIL import Image
+
 from agent.parser import (
     ClickCommand,
     ClickTextCommand,
@@ -13,7 +18,33 @@ from agent.parser import (
     TypeCommand,
     WaitCommand,
 )
-from agent.vlm import PlanResponseModel, plan_response_to_command
+from agent.vlm import (
+    GeminiClient,
+    PlanResponseModel,
+    VerifyResponseModel,
+    _parse_plan_response_json,
+    _parse_verify_response_json,
+    plan_response_to_command,
+)
+
+
+@pytest.fixture
+def json_client():
+    """A GeminiClient with JSON output enabled, no real SDK."""
+    with mock.patch("agent.vlm.genai.Client"):
+        return GeminiClient(
+            api_key="fake", model_name="fake-model", enable_json_output=True
+        )
+
+
+def _stub_json_response(client: GeminiClient, *, text: str, parsed=None):
+    """Mimic the SDK: `.text` is the raw model output; `.parsed` is the
+    SDK-populated pydantic instance (may be None if the SDK couldn't / didn't).
+    """
+    resp = mock.MagicMock()
+    resp.text = text
+    resp.parsed = parsed
+    client._client.models.generate_content = mock.MagicMock(return_value=resp)
 
 
 def test_plan_response_click():
@@ -101,3 +132,131 @@ def test_plan_response_unknown_kind_returns_none():
         plan_response_to_command(PlanResponseModel(command="UNKNOWN", x=1, y=2))
         is None
     )
+
+
+# --- PR #8 regression: manual JSON fallback when SDK doesn't populate .parsed -
+
+def test_parse_plan_response_json_decodes_valid_blob():
+    text = '{"command": "CLICK", "x": 500, "y": 600}'
+    parsed = _parse_plan_response_json(text)
+    assert isinstance(parsed, PlanResponseModel)
+    assert parsed.command == "CLICK"
+    assert parsed.x == 500 and parsed.y == 600
+
+
+def test_parse_plan_response_json_strips_markdown_fences():
+    text = '```json\n{"command": "PRESS", "key": "enter"}\n```'
+    parsed = _parse_plan_response_json(text)
+    assert isinstance(parsed, PlanResponseModel)
+    cmd = plan_response_to_command(parsed)
+    assert cmd == PressCommand(key="enter")
+
+
+def test_parse_plan_response_json_returns_none_on_invalid_json():
+    assert _parse_plan_response_json("not json at all") is None
+    assert _parse_plan_response_json("") is None
+    # Valid JSON but not an object — we expect a dict at the top level.
+    assert _parse_plan_response_json("[1, 2, 3]") is None
+
+
+def test_parse_plan_response_json_returns_none_on_missing_required_field():
+    # PlanResponseModel requires `command`; an empty dict should fail validation.
+    assert _parse_plan_response_json("{}") is None
+
+
+def test_parse_verify_response_json_pass():
+    parsed = _parse_verify_response_json(
+        '{"verdict": "PASS", "reason": "address bar focused"}'
+    )
+    assert isinstance(parsed, VerifyResponseModel)
+    assert parsed.verdict == "PASS"
+    assert parsed.reason == "address bar focused"
+
+
+def test_parse_verify_response_json_fail_with_fences():
+    parsed = _parse_verify_response_json(
+        '```\n{"verdict": "FAIL", "reason": "nothing happened"}\n```'
+    )
+    assert isinstance(parsed, VerifyResponseModel)
+    assert parsed.verdict == "FAIL"
+    assert parsed.reason == "nothing happened"
+
+
+def test_parse_verify_response_json_returns_none_on_non_json():
+    # A plain "PASS" string would have been handled by the legacy
+    # `_parse_verify_text` path — the JSON helper should decline it.
+    assert _parse_verify_response_json("VERDICT: PASS (text mode)") is None
+    assert _parse_verify_response_json("") is None
+
+
+# --- End-to-end regression: SDK returns parsed=None but .text is valid JSON ---
+
+def test_plan_action_recovers_when_sdk_parsed_is_none(json_client):
+    """Before PR #8 fix: if `response.parsed` was None (old SDK, schema
+    quirk, etc.), plan_action would fall through to `parse_command()` on
+    a JSON blob and return (text, None) — the caller would see a parse
+    failure. After: we decode the JSON ourselves and return a real Command.
+    """
+    _stub_json_response(
+        json_client,
+        text='{"command": "CLICK", "x": 250, "y": 750}',
+        parsed=None,  # <-- simulates the bug surface
+    )
+    text, cmd = json_client.plan_action("step", Image.new("RGB", (10, 10)))
+    assert cmd == ClickCommand(x=250, y=750)
+    assert '"command"' in text  # raw JSON preserved for logs
+
+
+def test_verify_recovers_when_sdk_parsed_is_none_pass(json_client):
+    """Before PR #8 fix: verify() with parsed=None would send the JSON blob
+    through `_parse_verify_text` which searches for literal 'VERDICT: PASS'
+    — doesn't match — returns an "Unparseable" FAIL. After: decode JSON
+    and return the real verdict.
+    """
+    _stub_json_response(
+        json_client,
+        text='{"verdict": "PASS", "reason": "address bar focused"}',
+        parsed=None,
+    )
+    result = json_client.verify("click address bar", Image.new("RGB", (10, 10)))
+    assert result.passed is True
+    assert "address bar focused" in result.reason
+
+
+def test_verify_recovers_when_sdk_parsed_is_none_fail(json_client):
+    _stub_json_response(
+        json_client,
+        text='{"verdict": "FAIL", "reason": "nothing changed"}',
+        parsed=None,
+    )
+    result = json_client.verify("click thing", Image.new("RGB", (10, 10)))
+    assert result.passed is False
+    assert "nothing changed" in result.reason
+
+
+def test_verify_still_works_when_sdk_populates_parsed(json_client):
+    """Happy path regression: parsed is populated, JSON fallback is NOT
+    exercised, and the verdict still comes through correctly.
+    """
+    _stub_json_response(
+        json_client,
+        text='{"verdict": "PASS"}',
+        parsed=VerifyResponseModel(verdict="PASS", reason="looks good"),
+    )
+    result = json_client.verify("step", Image.new("RGB", (10, 10)))
+    assert result.passed is True
+    assert "looks good" in result.reason
+
+
+def test_verify_falls_through_to_text_parser_on_non_json(json_client):
+    """If the model emits prose (truly non-JSON), the legacy text parser
+    is still the last resort. This guards against accidental regression
+    on that path too.
+    """
+    _stub_json_response(
+        json_client,
+        text="VERDICT: PASS\nThe page loaded as expected.",
+        parsed=None,
+    )
+    result = json_client.verify("step", Image.new("RGB", (10, 10)))
+    assert result.passed is True

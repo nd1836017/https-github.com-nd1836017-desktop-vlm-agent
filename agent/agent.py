@@ -601,10 +601,11 @@ def run(config: Config, resume: bool = False) -> int:
             step_idx=idx,
         )
 
+        # action_text is resolved inside the writer from the most recent
+        # save_plan() call for this step — no placeholder needed.
         artifact_writer.append_summary(
             step_idx=idx,
             step_text=step,
-            action_text="<see step_NNN_plan.txt>",
             passed=result.passed,
             reason=result.reason,
         )

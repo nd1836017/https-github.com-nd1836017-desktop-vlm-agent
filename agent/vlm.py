@@ -4,6 +4,7 @@ Uses the modern `google-genai` SDK (`pip install google-genai`).
 """
 from __future__ import annotations
 
+import json
 import logging
 import random
 import re
@@ -16,7 +17,7 @@ from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
 from PIL import Image
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .cost import RpdGuard
 from .parser import (
@@ -68,6 +69,68 @@ class PlanResponseModel(BaseModel):
         default=None,
         description="Human-readable reason for PAUSE (e.g. 'Verify it's you prompt').",
     )
+
+
+def _parse_plan_response_json(text: str) -> PlanResponseModel | None:
+    """Best-effort JSON -> PlanResponseModel when the SDK didn't populate `.parsed`.
+
+    This is the safety net: when `ENABLE_JSON_OUTPUT=true` the model is
+    configured with `response_mime_type="application/json"`, so the raw
+    text should be valid JSON even if `response.parsed` is None (old SDK
+    versions, schema-validation quirks, etc.). Without this fallback, the
+    caller falls through to `parser.parse_command()` which is a regex
+    designed for free-form text and won't extract anything useful from
+    a JSON blob.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    # Strip optional markdown fences the model sometimes adds despite the
+    # mime_type hint.
+    if stripped.startswith("```"):
+        stripped = stripped.strip("`")
+        if stripped.lower().startswith("json"):
+            stripped = stripped[4:]
+        stripped = stripped.strip()
+    try:
+        payload = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return PlanResponseModel.model_validate(payload)
+    except ValidationError:
+        return None
+
+
+def _parse_verify_response_json(text: str) -> VerifyResponseModel | None:
+    """Best-effort JSON -> VerifyResponseModel when the SDK didn't populate `.parsed`.
+
+    Mirrors ``_parse_plan_response_json`` for the verify call. Without
+    this, a response like ``{"verdict": "PASS", "reason": "..."}`` would
+    slip past the isinstance(parsed, VerifyResponseModel) gate and be
+    regex-searched for ``VERDICT: PASS`` (which it never contains),
+    producing a bogus "Unparseable" FAIL.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    if stripped.startswith("```"):
+        stripped = stripped.strip("`")
+        if stripped.lower().startswith("json"):
+            stripped = stripped[4:]
+        stripped = stripped.strip()
+    try:
+        payload = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return VerifyResponseModel.model_validate(payload)
+    except ValidationError:
+        return None
 
 
 def plan_response_to_command(resp: PlanResponseModel) -> Command | None:
@@ -386,14 +449,25 @@ class GeminiClient:
                     return text, cmd
                 log.warning(
                     "plan_action: JSON schema returned but could not be mapped "
-                    "to a Command; falling back to regex parse: %r",
+                    "to a Command; falling back to manual JSON parse: %r",
                     parsed,
                 )
             else:
                 log.warning(
-                    "plan_action: no structured parse available; falling back "
-                    "to regex parse on raw text."
+                    "plan_action: no structured parse available; "
+                    "trying manual JSON parse of raw text."
                 )
+
+            # Safety net: the SDK didn't populate `response.parsed`, but the
+            # raw text should still be JSON (mime_type was set). Decode it
+            # ourselves before handing back to the regex parser — the regex
+            # is designed for free-form "CLICK [x,y]" text and won't extract
+            # anything from a JSON blob.
+            manual = _parse_plan_response_json(text)
+            if manual is not None:
+                cmd = plan_response_to_command(manual)
+                if cmd is not None:
+                    return text, cmd
             return text, None
 
         parts.append("Respond with ONE command only.")
@@ -418,6 +492,15 @@ class GeminiClient:
             text = (response.text or "").strip()
             log.debug("verify response (json): %r", text)
             parsed = getattr(response, "parsed", None)
+            if not isinstance(parsed, VerifyResponseModel):
+                # SDK didn't populate `.parsed` — try to decode the raw JSON
+                # ourselves before handing off to the free-form text parser.
+                # The legacy `_parse_verify_text` looks for "VERDICT: PASS"
+                # literal strings which do NOT appear in a JSON blob
+                # containing `"verdict": "PASS"`, so without this step we'd
+                # always mislabel valid responses as "Unparseable".
+                parsed = _parse_verify_response_json(text)
+
             if isinstance(parsed, VerifyResponseModel):
                 verdict = (parsed.verdict or "").upper().strip()
                 reason = (parsed.reason or "").strip() or verdict
@@ -433,7 +516,8 @@ class GeminiClient:
                     passed=False,
                     reason=f"Unparseable verdict: {parsed.verdict!r}",
                 )
-            # Fall through to text parsing.
+            # Last-resort fall through — this path now handles only truly
+            # non-JSON responses (e.g. the model emitted raw prose).
             return self._parse_verify_text(text)
 
         response = self._generate("verify", [prompt, screenshot], self._verify_config)

@@ -128,6 +128,7 @@ def _attempt_step(
     click_max_delay_seconds: float = 0.0,
     type_min_interval_seconds: float = 0.02,
     type_max_interval_seconds: float = 0.02,
+    log_redact_type: bool = True,
 ) -> tuple[VerificationResult, str]:
     """Run one plan/execute/verify attempt and return (verdict, action_text).
 
@@ -180,7 +181,7 @@ def _attempt_step(
                     action_text,
                 )
         else:
-            action_text = render_command(cmd)
+            action_text = render_command(cmd, redact_type=log_redact_type)
             log.info("Action: %s", action_text)
             execute(
                 cmd,
@@ -190,6 +191,7 @@ def _attempt_step(
                 click_max_delay_seconds=click_max_delay_seconds,
                 type_min_interval_seconds=type_min_interval_seconds,
                 type_max_interval_seconds=type_max_interval_seconds,
+                log_redact_type=log_redact_type,
             )
 
         post_screenshot = capture_screenshot()
@@ -221,6 +223,7 @@ def run_step(
     click_max_delay_seconds: float = 0.0,
     type_min_interval_seconds: float = 0.02,
     type_max_interval_seconds: float = 0.02,
+    log_redact_type: bool = True,
 ) -> VerificationResult:
     """Run one step with up to `max_replans` replans on verify FAIL.
 
@@ -260,6 +263,7 @@ def run_step(
             click_max_delay_seconds=click_max_delay_seconds,
             type_min_interval_seconds=type_min_interval_seconds,
             type_max_interval_seconds=type_max_interval_seconds,
+            log_redact_type=log_redact_type,
         )
         last_verdict = verdict
         last_action_text = action_text
@@ -355,6 +359,7 @@ def run(config: Config, resume: bool = False) -> int:
             click_max_delay_seconds=config.click_max_delay_seconds,
             type_min_interval_seconds=config.type_min_interval_seconds,
             type_max_interval_seconds=config.type_max_interval_seconds,
+            log_redact_type=config.log_redact_type,
         )
 
         if not result.passed:

@@ -1,9 +1,17 @@
 """Regex-based command parser for VLM responses.
 
 Supported commands:
-    CLICK [X,Y]      — X and Y are integers on the 0-1000 normalized grid.
-    PRESS [KEY]      — a single key name or '+'-separated hotkey (e.g. ctrl+c).
-    TYPE [TEXT]      — literal text to type.
+    CLICK [X,Y]                 — click at normalized coordinates (0-1000 grid).
+    DOUBLE_CLICK [X,Y]          — double-click at normalized coordinates.
+    RIGHT_CLICK [X,Y]           — right-click at normalized coordinates.
+    PRESS [KEY]                 — single key or '+'-separated hotkey.
+    TYPE [TEXT]                 — literal text to type.
+    SCROLL [DIR, AMOUNT]        — scroll up/down by N "clicks" (AMOUNT is a
+                                  positive integer; DIR is up/down).
+    DRAG [X1,Y1,X2,Y2]          — press at (X1,Y1), drag to (X2,Y2), release.
+    MOVE_TO [X,Y]               — move mouse to (X,Y) without clicking (hover).
+    WAIT [SECONDS]              — sleep N seconds (float). Capped by the
+                                  executor at WAIT_MAX_SECONDS.
 
 The parser is defensive: it tolerates surrounding conversational text,
 case variations, and a few common bracket omissions. It never raises on
@@ -19,12 +27,36 @@ from typing import Literal
 
 log = logging.getLogger(__name__)
 
-CommandType = Literal["CLICK", "PRESS", "TYPE"]
+CommandType = Literal[
+    "CLICK",
+    "DOUBLE_CLICK",
+    "RIGHT_CLICK",
+    "PRESS",
+    "TYPE",
+    "SCROLL",
+    "DRAG",
+    "MOVE_TO",
+    "WAIT",
+]
 
 
 @dataclass(frozen=True)
 class ClickCommand:
     kind: CommandType = "CLICK"
+    x: int = 0
+    y: int = 0
+
+
+@dataclass(frozen=True)
+class DoubleClickCommand:
+    kind: CommandType = "DOUBLE_CLICK"
+    x: int = 0
+    y: int = 0
+
+
+@dataclass(frozen=True)
+class RightClickCommand:
+    kind: CommandType = "RIGHT_CLICK"
     x: int = 0
     y: int = 0
 
@@ -41,20 +73,88 @@ class TypeCommand:
     text: str = ""
 
 
-Command = ClickCommand | PressCommand | TypeCommand
+@dataclass(frozen=True)
+class ScrollCommand:
+    kind: CommandType = "SCROLL"
+    direction: str = "down"  # "up" or "down"
+    amount: int = 3
 
 
-# Primary patterns (strict: bracketed form).
+@dataclass(frozen=True)
+class DragCommand:
+    kind: CommandType = "DRAG"
+    x1: int = 0
+    y1: int = 0
+    x2: int = 0
+    y2: int = 0
+
+
+@dataclass(frozen=True)
+class MoveToCommand:
+    kind: CommandType = "MOVE_TO"
+    x: int = 0
+    y: int = 0
+
+
+@dataclass(frozen=True)
+class WaitCommand:
+    kind: CommandType = "WAIT"
+    seconds: float = 0.0
+
+
+Command = (
+    ClickCommand
+    | DoubleClickCommand
+    | RightClickCommand
+    | PressCommand
+    | TypeCommand
+    | ScrollCommand
+    | DragCommand
+    | MoveToCommand
+    | WaitCommand
+)
+
+
+# --- Strict patterns (bracketed form, preferred). -----------------------------
+
+# Note the order matters: DOUBLE_CLICK / RIGHT_CLICK / MOVE_TO must be matched
+# before CLICK, because CLICK's regex will also match "DOUBLE_CLICK [..,..]".
+_DOUBLE_CLICK_RE = re.compile(
+    r"DOUBLE[_\s]?CLICK\s*\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]",
+    re.IGNORECASE,
+)
+_RIGHT_CLICK_RE = re.compile(
+    r"RIGHT[_\s]?CLICK\s*\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]",
+    re.IGNORECASE,
+)
+_MOVE_TO_RE = re.compile(
+    r"MOVE[_\s]?TO\s*\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]",
+    re.IGNORECASE,
+)
 _CLICK_RE = re.compile(
-    r"CLICK\s*\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]",
+    r"(?<![A-Z_])CLICK\s*\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]",
     re.IGNORECASE,
 )
 _PRESS_RE = re.compile(r"PRESS\s*\[\s*([^\]\n]+?)\s*\]", re.IGNORECASE)
 _TYPE_RE = re.compile(r"TYPE\s*\[\s*(.*?)\s*\]", re.IGNORECASE | re.DOTALL)
+_SCROLL_RE = re.compile(
+    r"SCROLL\s*\[\s*(up|down|UP|DOWN)\s*,\s*(-?\d+)\s*\]",
+    re.IGNORECASE,
+)
+_DRAG_RE = re.compile(
+    r"DRAG\s*\[\s*(-?\d+)\s*,\s*(-?\d+)\s*(?:,|->|=>|to)\s*(-?\d+)\s*,\s*(-?\d+)\s*\]",
+    re.IGNORECASE,
+)
+_WAIT_RE = re.compile(
+    r"WAIT\s*\[\s*(\d+(?:\.\d+)?)\s*(?:s|sec|seconds)?\s*\]",
+    re.IGNORECASE,
+)
 
-# Fallback patterns (lenient: missing brackets).
+
+# --- Lenient fallbacks (missing brackets, common prose forms). ----------------
+
 _CLICK_RE_LENIENT = re.compile(
-    r"CLICK\s*\(?\s*(-?\d+)\s*[,\s]\s*(-?\d+)\s*\)?",
+    r"(?<![A-Z_])CLICK\s*\(?\s*(-?\d+)\s*[,\s]\s*(-?\d+)\s*\)?",
     re.IGNORECASE,
 )
 _PRESS_RE_LENIENT = re.compile(
@@ -76,10 +176,42 @@ def parse_command(response: str) -> Command | None:
         return None
 
     try:
-        # Strict forms first.
+        # Compound commands must be tried before CLICK so the CLICK pattern
+        # doesn't eat "DOUBLE_CLICK [..]" or "RIGHT_CLICK [..]".
+        m = _DOUBLE_CLICK_RE.search(response)
+        if m:
+            return DoubleClickCommand(x=int(m.group(1)), y=int(m.group(2)))
+
+        m = _RIGHT_CLICK_RE.search(response)
+        if m:
+            return RightClickCommand(x=int(m.group(1)), y=int(m.group(2)))
+
+        m = _MOVE_TO_RE.search(response)
+        if m:
+            return MoveToCommand(x=int(m.group(1)), y=int(m.group(2)))
+
         m = _CLICK_RE.search(response)
         if m:
             return ClickCommand(x=int(m.group(1)), y=int(m.group(2)))
+
+        m = _SCROLL_RE.search(response)
+        if m:
+            direction = m.group(1).lower()
+            amount = abs(int(m.group(2)))
+            return ScrollCommand(direction=direction, amount=amount)
+
+        m = _DRAG_RE.search(response)
+        if m:
+            return DragCommand(
+                x1=int(m.group(1)),
+                y1=int(m.group(2)),
+                x2=int(m.group(3)),
+                y2=int(m.group(4)),
+            )
+
+        m = _WAIT_RE.search(response)
+        if m:
+            return WaitCommand(seconds=float(m.group(1)))
 
         m = _PRESS_RE.search(response)
         if m:

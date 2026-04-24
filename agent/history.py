@@ -9,7 +9,18 @@ from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .parser import ClickCommand, Command, PressCommand, TypeCommand
+from .parser import (
+    ClickCommand,
+    Command,
+    DoubleClickCommand,
+    DragCommand,
+    MoveToCommand,
+    PressCommand,
+    RightClickCommand,
+    ScrollCommand,
+    TypeCommand,
+    WaitCommand,
+)
 
 
 @dataclass(frozen=True)
@@ -20,14 +31,33 @@ class StepRecord:
     reason: str
 
 
-def render_command(cmd: Command) -> str:
-    """Render a parsed command back as its canonical `CLICK [...]` form."""
+def render_command(cmd: Command, *, redact_type: bool = False) -> str:
+    """Render a parsed command back as its canonical `COMMAND [...]` form.
+
+    When ``redact_type`` is True, `TYPE` commands are rendered as
+    ``TYPE [<REDACTED, N chars>]`` to avoid leaking sensitive strings into
+    log files or history summaries. Non-TYPE commands are never affected.
+    """
     if isinstance(cmd, ClickCommand):
         return f"CLICK [{cmd.x},{cmd.y}]"
+    if isinstance(cmd, DoubleClickCommand):
+        return f"DOUBLE_CLICK [{cmd.x},{cmd.y}]"
+    if isinstance(cmd, RightClickCommand):
+        return f"RIGHT_CLICK [{cmd.x},{cmd.y}]"
     if isinstance(cmd, PressCommand):
         return f"PRESS [{cmd.key}]"
     if isinstance(cmd, TypeCommand):
+        if redact_type:
+            return f"TYPE [<REDACTED, {len(cmd.text)} chars>]"
         return f"TYPE [{cmd.text}]"
+    if isinstance(cmd, ScrollCommand):
+        return f"SCROLL [{cmd.direction},{cmd.amount}]"
+    if isinstance(cmd, DragCommand):
+        return f"DRAG [{cmd.x1},{cmd.y1},{cmd.x2},{cmd.y2}]"
+    if isinstance(cmd, MoveToCommand):
+        return f"MOVE_TO [{cmd.x},{cmd.y}]"
+    if isinstance(cmd, WaitCommand):
+        return f"WAIT [{cmd.seconds}]"
     return str(cmd)
 
 

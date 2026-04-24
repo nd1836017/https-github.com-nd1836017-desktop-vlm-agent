@@ -26,6 +26,7 @@ Rules:
 - Output ONLY the command, wrapped in square brackets. No prose, no markdown, no explanation.
 - Use the 0-1000 normalized grid for coordinates — never pixels.
 - If the step has already been completed, still emit a single no-op friendly command (e.g. PRESS [esc]) — never output nothing.
+- You may be shown a summary of previous steps and a previous-attempt failure reason. Use them to avoid repeating mistakes and to pick a DIFFERENT action when replanning after a failure.
 """
 
 
@@ -63,9 +64,35 @@ class GeminiClient:
         )
         log.info("Initialized Gemini client with model=%s", model_name)
 
-    def plan_action(self, step: str, screenshot: Image.Image) -> str:
-        """Ask the VLM what action to take for the given step."""
-        prompt = f"Current step: {step}\n\nRespond with ONE command only."
+    def plan_action(
+        self,
+        step: str,
+        screenshot: Image.Image,
+        history_summary: str = "",
+        previous_failure: str = "",
+    ) -> str:
+        """Ask the VLM what action to take for the given step.
+
+        `history_summary` is an optional compact text block of recent
+        (step, action, verdict) records. `previous_failure` is set when we
+        are replanning after a verifier FAIL on this same step — in that
+        case the VLM should pick a DIFFERENT action.
+        """
+        parts: list[str] = []
+        if history_summary:
+            parts.append(
+                "Recent action history (most recent last):\n" + history_summary
+            )
+        if previous_failure:
+            parts.append(
+                "Your previous attempt on THIS step failed. Reason:\n"
+                f"  {previous_failure}\n"
+                "Pick a DIFFERENT action this time."
+            )
+        parts.append(f"Current step: {step}")
+        parts.append("Respond with ONE command only.")
+        prompt = "\n\n".join(parts)
+
         response = self._client.models.generate_content(
             model=self._model_name,
             contents=[prompt, screenshot],

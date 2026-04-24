@@ -16,6 +16,9 @@ class Config:
     tasks_file: Path
     animation_buffer_seconds: float
     max_step_retries: int
+    max_replans_per_step: int
+    history_window: int
+    state_file: Path
     log_level: str
 
     @classmethod
@@ -36,6 +39,9 @@ class Config:
                 os.getenv("ANIMATION_BUFFER_SECONDS", "1.5")
             ),
             max_step_retries=int(os.getenv("MAX_STEP_RETRIES", "1")),
+            max_replans_per_step=int(os.getenv("MAX_REPLANS_PER_STEP", "2")),
+            history_window=int(os.getenv("HISTORY_WINDOW", "5")),
+            state_file=Path(os.getenv("STATE_FILE", ".agent_state.json")).expanduser(),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         )
 

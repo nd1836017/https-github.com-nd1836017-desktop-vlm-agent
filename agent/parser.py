@@ -12,6 +12,9 @@ Supported commands:
     MOVE_TO [X,Y]               — move mouse to (X,Y) without clicking (hover).
     WAIT [SECONDS]              — sleep N seconds (float). Capped by the
                                   executor at WAIT_MAX_SECONDS.
+    CLICK_TEXT [LABEL]          — click the center of the on-screen text that
+                                  best matches LABEL. Uses OCR and falls back
+                                  to replan when no match is found.
 
 The parser is defensive: it tolerates surrounding conversational text,
 case variations, and a few common bracket omissions. It never raises on
@@ -37,6 +40,7 @@ CommandType = Literal[
     "DRAG",
     "MOVE_TO",
     "WAIT",
+    "CLICK_TEXT",
 ]
 
 
@@ -102,6 +106,12 @@ class WaitCommand:
     seconds: float = 0.0
 
 
+@dataclass(frozen=True)
+class ClickTextCommand:
+    kind: CommandType = "CLICK_TEXT"
+    label: str = ""
+
+
 Command = (
     ClickCommand
     | DoubleClickCommand
@@ -112,6 +122,7 @@ Command = (
     | DragCommand
     | MoveToCommand
     | WaitCommand
+    | ClickTextCommand
 )
 
 
@@ -149,6 +160,10 @@ _WAIT_RE = re.compile(
     r"WAIT\s*\[\s*(\d+(?:\.\d+)?)\s*(?:s|sec|seconds)?\s*\]",
     re.IGNORECASE,
 )
+_CLICK_TEXT_RE = re.compile(
+    r"CLICK[_\s]?TEXT\s*\[\s*(.*?)\s*\]",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 # --- Lenient fallbacks (missing brackets, common prose forms). ----------------
@@ -176,6 +191,14 @@ def parse_command(response: str) -> Command | None:
         return None
 
     try:
+        # CLICK_TEXT must be tried before CLICK so the CLICK regex doesn't
+        # mistakenly match prose inside a CLICK_TEXT label.
+        m = _CLICK_TEXT_RE.search(response)
+        if m:
+            label = m.group(1).strip()
+            if label:
+                return ClickTextCommand(label=label)
+
         # Compound commands must be tried before CLICK so the CLICK pattern
         # doesn't eat "DOUBLE_CLICK [..]" or "RIGHT_CLICK [..]".
         m = _DOUBLE_CLICK_RE.search(response)

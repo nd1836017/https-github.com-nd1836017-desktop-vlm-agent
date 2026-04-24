@@ -135,8 +135,17 @@ The VLM is instructed to respond with exactly one of:
 | `SCROLL [DIR, AMOUNT]` | `SCROLL [down, 5]` | Scroll the active window up or down by N wheel clicks. |
 | `DRAG [X1,Y1,X2,Y2]` | `DRAG [100,200,500,600]` | Press at (X1,Y1), drag to (X2,Y2), release. |
 | `WAIT [SECONDS]` | `WAIT [2.5]` | Sleep `SECONDS` before the next step (capped at 60s). |
+| `CLICK_TEXT [LABEL]` | `CLICK_TEXT [Sign in]` | OCR the current screen and click the text whose label best matches `LABEL`. Deterministic for text targets — doesn't rely on the VLM's coordinate estimate at all. Requires `tesseract-ocr` installed. |
 
 The parser is lenient: it will still recover if the VLM omits brackets, wraps the command in prose, or uses parentheses instead of brackets. The legacy `CLICK`, `PRESS`, and `TYPE` paths are unchanged.
+
+### Structured JSON output
+
+When `ENABLE_JSON_OUTPUT=true` (default) the planner and verifier ask Gemini for a `response_schema`-constrained JSON object. Parsing is deterministic, so the agent skips its regex fallback on the common path. If JSON parsing fails for any reason, the agent still falls back to the legacy regex parser on the raw text — you never lose responses to a schema error. Set to `false` to force the legacy text-only path.
+
+### Global replan cap
+
+`MAX_TOTAL_REPLANS=10` (default) bounds replans across the entire run, not just per-step. When the cumulative replan count exceeds the cap, the agent halts with a clear "Global replan budget exhausted" message. Set to `0` to disable (legacy behavior: only the per-step cap applies).
 
 ## Persistent browser profile
 
@@ -151,6 +160,10 @@ PROFILE_DIR=~/my-agent-profile ./scripts/launch-chrome.sh https://youtube.com
 ```
 
 The agent itself does not launch the browser — this helper just pairs a persistent profile with whatever Chrome-family binary is on your PATH (`google-chrome`, `chromium`, etc.).
+
+## System prerequisites
+
+- **`tesseract-ocr`** — required by the `CLICK_TEXT` primitive. On Debian/Ubuntu: `sudo apt-get install tesseract-ocr`. On macOS with Homebrew: `brew install tesseract`. If tesseract is missing, `CLICK_TEXT` silently logs a warning and falls back to the replan loop (it never crashes the agent).
 
 ## Safety notes
 

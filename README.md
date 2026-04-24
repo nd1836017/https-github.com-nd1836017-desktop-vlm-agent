@@ -152,7 +152,7 @@ python -m agent --reset
 ## Features
 
 - **Visual-Action Loop** — screenshot → VLM plan → parse → `pyautogui` execute → screenshot → VLM verify.
-- **Rich command set** — `CLICK`, `CLICK_TEXT` (OCR-anchored), `PRESS`, `TYPE` (clipboard-based for Unicode), `SCROLL`, `DRAG`, `WAIT`, `PAUSE`.
+- **Rich command set** — `CLICK` / `DOUBLE_CLICK` / `RIGHT_CLICK` / `MOVE_TO`, `CLICK_TEXT` (OCR-anchored), `PRESS`, `TYPE` (clipboard-based for Unicode), `SCROLL`, `DRAG`, `WAIT`, `PAUSE`.
 - **Two-stage CLICK** — after a coarse coordinate, the agent crops around the target and asks the VLM to refine + disambiguate. Cuts misclicks dramatically.
 - **Normalized grid** — VLM emits coordinates on a 0–1000 grid; agent auto-detects native resolution and maps to pixels.
 - **Short-term memory + replan** — rolling window of recent (step, action, verdict) rows fed back into the planner; on verifier FAIL the agent replans up to a configurable budget before halting.
@@ -261,10 +261,13 @@ The VLM is instructed to respond with exactly one of the following:
 | Command | Example | Meaning |
 | --- | --- | --- |
 | `CLICK [X,Y]` | `CLICK [500,250]` | Left-click at normalized (0–1000) coordinates. |
+| `DOUBLE_CLICK [X,Y]` | `DOUBLE_CLICK [400,400]` | Double-click (e.g. open files/folders). |
+| `RIGHT_CLICK [X,Y]` | `RIGHT_CLICK [700,300]` | Right-click (context menu). |
+| `MOVE_TO [X,Y]` | `MOVE_TO [500,500]` | Move mouse without clicking (hover tooltips/menus). |
 | `CLICK_TEXT [label]` | `CLICK_TEXT [Sign in]` | OCR-anchored click on the nearest matching visible text. |
 | `PRESS [KEY]` | `PRESS [enter]`, `PRESS [ctrl+c]` | Press a single key or `+`-separated hotkey. |
 | `TYPE [TEXT]` | `TYPE [hello world]` | Type literal text. Non-ASCII is pasted via clipboard. |
-| `SCROLL [DIRECTION]` | `SCROLL [down]` | Scroll up or down at the current mouse position. |
+| `SCROLL [DIR, AMOUNT]` | `SCROLL [down, 5]` | Scroll up or down by AMOUNT wheel clicks. Both fields required. |
 | `DRAG [X1,Y1,X2,Y2]` | `DRAG [100,200,400,500]` | Click-and-drag from (X1,Y1) to (X2,Y2) on the 0–1000 grid. |
 | `WAIT [SECONDS]` | `WAIT [3]` | Pause execution for N seconds (no VLM call). |
 | `PAUSE [reason]` | `PAUSE [2FA prompt needs manual approval]` | Emitted by the VLM when it sees a 2FA / CAPTCHA / "Verify it's you" screen. Agent halts cleanly with zero side-effects and waits for <kbd>Enter</kbd>. |

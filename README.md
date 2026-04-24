@@ -1,6 +1,6 @@
 # Desktop VLM Agent
 
-A Python desktop automation agent that uses **Gemini 2.0 Flash** (a Vision-Language Model) as its "brain" to interact with the OS. It reads step-by-step natural-language instructions from `tasks.txt`, captures screenshots, asks the VLM what to do, parses a command from the response, executes it with `pyautogui`, and verifies the outcome with a second VLM call.
+A Python desktop automation agent that uses a **Gemini Flash** VLM as its "brain" to interact with the OS. It reads step-by-step natural-language instructions from `tasks.txt`, captures screenshots, asks the VLM what to do, parses a command from the response, executes it with `pyautogui`, and verifies the outcome with a second VLM call.
 
 ## Features
 
@@ -9,7 +9,13 @@ A Python desktop automation agent that uses **Gemini 2.0 Flash** (a Vision-Langu
 - **Scaling correction** — VLM emits coordinates on a normalized 0–1000 grid; the agent auto-detects the native screen resolution and maps to pixels.
 - **Animation buffer** — a mandatory `time.sleep(1.5)` after any `CLICK` or `PRESS [win]` so OS UI animations can finish before the next screenshot.
 - **Regex-protected parsing** — tolerates conversational text and common bracket omissions; if a command cannot be parsed, the step is retried once.
-- **Verification + halt** — after every action, a second VLM call checks that the screen state matches the goal; if not, execution halts and the user is notified via the terminal.
+- **Short-term memory** — a rolling window of recent `(step, action, verdict)` records is fed back into each plan prompt so the VLM can reason about what has already happened. Tunable via `HISTORY_WINDOW`.
+- **Replan-on-failure with budget** — when the verifier reports FAIL, the agent tells the VLM what went wrong and asks for a different action, up to `MAX_REPLANS_PER_STEP` times before halting. Avoids both premature halts and runaway retry loops.
+- **Checkpoint + resume** — after every verified step the progress is atomically written to a JSON state file. Long runs can be resumed from the last successful step with `python -m agent --resume`.
+- **Two-stage CLICK refinement** (optional) — when enabled, after the planner emits a coarse `CLICK [x,y]` the agent crops a `TWO_STAGE_CROP_SIZE_PX` × `TWO_STAGE_CROP_SIZE_PX` region around that point, asks the VLM to list all plausible targets matching the step, and (if multiple are returned) a second VLM call disambiguates by picking the right one. Dramatically cuts "missed the address bar"-style failures on dense / multi-hitbox UIs. Toggle per run with `--two-stage-click` / `--no-two-stage-click`, or globally via `ENABLE_TWO_STAGE_CLICK`.
+- **Human-like input cadence** (bot-detection dodge) — every `CLICK` is preceded by a random sleep in `[CLICK_MIN_DELAY_SECONDS, CLICK_MAX_DELAY_SECONDS]`, and every character of a `TYPE` is followed by a random sleep in `[TYPE_MIN_INTERVAL_SECONDS, TYPE_MAX_INTERVAL_SECONDS]`, so the automation doesn't present a perfectly uniform rhythm to heuristic bot detectors. Set the upper bound to `0` to disable.
+- **Retry-with-backoff on quota / unavailability** — transient Gemini errors (`429 RESOURCE_EXHAUSTED`, `503 UNAVAILABLE`, other `5xx`) are retried with exponential backoff + full jitter, capped by `GEMINI_RETRY_MAX_DELAY_SECONDS`, up to `GEMINI_RETRY_MAX_ATTEMPTS` times. The agent **never** falls back to a different model — it waits and retries on the pinned `GEMINI_MODEL`.
+- **Verification + halt** — after every action, a second VLM call checks that the screen state matches the goal; if the replan budget is exhausted, execution halts and the user is notified via the terminal.
 - **Failsafe** — `pyautogui.FAILSAFE = True` (move the mouse to a screen corner to abort).
 
 ## Architecture
@@ -71,7 +77,20 @@ Env vars (all optional except `GEMINI_API_KEY`):
 | `GEMINI_MODEL` | `gemini-3.1-flash-lite-preview` | Any Gemini vision-capable model (e.g. `gemini-3.1-flash-lite-preview`, `gemini-2.5-flash-lite`, `gemini-2.5-flash`). Lite = cheaper + higher free-tier quota. |
 | `TASKS_FILE` | `tasks.txt` | Path to the instructions file. |
 | `ANIMATION_BUFFER_SECONDS` | `1.5` | Sleep after CLICK / PRESS [win]. |
-| `MAX_STEP_RETRIES` | `1` | Retries per step on parse failure. |
+| `MAX_STEP_RETRIES` | `1` | Retries per attempt on unparseable VLM responses. |
+| `MAX_REPLANS_PER_STEP` | `2` | Replan attempts after a verifier FAIL before halting. |
+| `HISTORY_WINDOW` | `5` | Number of recent steps fed back to the VLM as short-term memory (0 = disabled). |
+| `STATE_FILE` | `.agent_state.json` | Checkpoint file written atomically after each verified step. |
+| `ENABLE_TWO_STAGE_CLICK` | `true` | Enable two-stage CLICK refinement (crop + VLM-refined pick + optional disambiguation). Overridable per run via `--two-stage-click` / `--no-two-stage-click`. |
+| `TWO_STAGE_CROP_SIZE_PX` | `300` | Side length (px) of the square cropped around the coarse click point for refinement. |
+| `MAX_CLICK_CANDIDATES` | `5` | Cap on the number of refined candidates to consider before disambiguation. |
+| `CLICK_MIN_DELAY_SECONDS` | `0.8` | Lower bound of the random pre-click sleep (bot-detection dodge). |
+| `CLICK_MAX_DELAY_SECONDS` | `2.0` | Upper bound of the random pre-click sleep. Set both to `0` to disable. |
+| `TYPE_MIN_INTERVAL_SECONDS` | `0.03` | Lower bound of the random per-keystroke pause during TYPE. |
+| `TYPE_MAX_INTERVAL_SECONDS` | `0.12` | Upper bound of the random per-keystroke pause. Set both to `0` to disable. |
+| `GEMINI_RETRY_MAX_ATTEMPTS` | `6` | Total attempts before giving up on a transient 429/5xx error. |
+| `GEMINI_RETRY_BASE_DELAY_SECONDS` | `5.0` | Base delay for exponential backoff (doubles each attempt). |
+| `GEMINI_RETRY_MAX_DELAY_SECONDS` | `300.0` | Cap on any single backoff interval (seconds). |
 | `LOG_LEVEL` | `INFO` | Standard Python logging level. |
 
 ## Write a task file
@@ -88,10 +107,16 @@ Type "Hello from the Desktop VLM Agent!"
 ## Run
 
 ```bash
-python -m agent
+python -m agent                      # normal run, starts from step 1
+python -m agent --resume             # continue from the last verified step
+python -m agent --reset              # delete the checkpoint before running
+
+# Two-stage CLICK refinement (crop + VLM-refined pick) — toggle per run:
+python -m agent --two-stage-click    # force ON for this run (safer, +API calls)
+python -m agent --no-two-stage-click # force OFF for this run (faster, cheaper)
 ```
 
-Logs go to stdout. On verification failure, the agent halts with a non-zero exit code and prints the reason.
+Logs go to stdout. On verification failure after the replan budget is exhausted, the agent halts with exit code 1, prints the reason, and suggests `--resume` so you can continue after fixing the blocker.
 
 **Abort at any time** by slamming your mouse into any corner of the screen — that triggers `pyautogui`'s failsafe.
 
@@ -102,10 +127,70 @@ The VLM is instructed to respond with exactly one of:
 | Command | Example | Meaning |
 | --- | --- | --- |
 | `CLICK [X,Y]` | `CLICK [500,250]` | Left-click at normalized (0–1000) coordinates. |
+| `DOUBLE_CLICK [X,Y]` | `DOUBLE_CLICK [400,400]` | Double-click (open files/folders). |
+| `RIGHT_CLICK [X,Y]` | `RIGHT_CLICK [700,300]` | Right-click (context menu). |
+| `MOVE_TO [X,Y]` | `MOVE_TO [500,500]` | Move mouse without clicking (hover tooltips/menus). |
 | `PRESS [KEY]` | `PRESS [win]`, `PRESS [ctrl+c]` | Press a single key or `+`-separated hotkey. |
-| `TYPE [TEXT]` | `TYPE [hello world]` | Type literal text. |
+| `TYPE [TEXT]` | `TYPE [hello world]` | Type literal text (logs are redacted by default — see `LOG_REDACT_TYPE`). |
+| `SCROLL [DIR, AMOUNT]` | `SCROLL [down, 5]` | Scroll the active window up or down by N wheel clicks. |
+| `DRAG [X1,Y1,X2,Y2]` | `DRAG [100,200,500,600]` | Press at (X1,Y1), drag to (X2,Y2), release. |
+| `WAIT [SECONDS]` | `WAIT [2.5]` | Sleep `SECONDS` before the next step (capped at 60s). |
+| `CLICK_TEXT [LABEL]` | `CLICK_TEXT [Sign in]` | OCR the current screen and click the text whose label best matches `LABEL`. Deterministic for text targets — doesn't rely on the VLM's coordinate estimate at all. Requires `tesseract-ocr` installed. |
+| `PAUSE [REASON]` | `PAUSE [Approve sign-in on your phone]` | Halt the agent and wait for a human to resolve `REASON` (e.g. 2FA, CAPTCHA, "Verify it's you" prompts). The agent prints the reason, blocks on stdin, and resumes when you press Enter. Emitted automatically by the planner when it detects such prompts on screen. |
 
-The parser is lenient: it will still recover if the VLM omits brackets, wraps the command in prose, or uses parentheses instead of brackets.
+The parser is lenient: it will still recover if the VLM omits brackets, wraps the command in prose, or uses parentheses instead of brackets. The legacy `CLICK`, `PRESS`, and `TYPE` paths are unchanged.
+
+### Structured JSON output
+
+When `ENABLE_JSON_OUTPUT=true` (default) the planner and verifier ask Gemini for a `response_schema`-constrained JSON object. Parsing is deterministic, so the agent skips its regex fallback on the common path. If JSON parsing fails for any reason, the agent still falls back to the legacy regex parser on the raw text — you never lose responses to a schema error. Set to `false` to force the legacy text-only path.
+
+### Global replan cap
+
+`MAX_TOTAL_REPLANS=10` (default) bounds replans across the entire run, not just per-step. When the cumulative replan count exceeds the cap, the agent halts with a clear "Global replan budget exhausted" message. Set to `0` to disable (legacy behavior: only the per-step cap applies).
+
+### Run artifacts
+
+Set `SAVE_RUN_ARTIFACTS=true` to capture every step of a run to `RUN_ARTIFACTS_DIR/<timestamp>/` (default `runs/`). Each step produces:
+
+```
+runs/20251201-193045/
+  step_001_before.png     # screenshot fed to the planner
+  step_001_after.png      # screenshot fed to the verifier
+  step_001_plan.txt       # raw VLM plan response + chosen action
+  step_001_verdict.txt    # PASS/FAIL + reason
+  step_002_before.png
+  ...
+  summary.json            # rolling per-step pass/fail list
+```
+
+Off by default — can fill disk on long runs. Flip it on when you need to debug a flaky step.
+
+### RPD (quota) guard
+
+`gemini-3.1-flash-lite-preview` has a 500 request-per-day free-tier limit, and the agent makes ~2 API calls per step (plan + verify, more with two-stage CLICK). The RPD guard tracks this run's calls and:
+
+- Logs a loud WARNING once usage crosses `RPD_WARN_THRESHOLD` (default 75%).
+- Halts cleanly between steps once usage crosses `RPD_HALT_THRESHOLD` (default 95%), with the checkpoint intact so `--resume` picks up later.
+
+Set `RPD_LIMIT=0` to disable both guards. Raise `RPD_LIMIT` if you've enabled paid-tier billing on your Google Cloud project (tens of thousands/day).
+
+## Persistent browser profile
+
+Google's "Verify it's you" device-trust challenge fires on every *new* browser, so log it in once and keep the profile around. `scripts/launch-chrome.sh` launches Chrome with a user-data-dir that survives across agent runs:
+
+```bash
+# First run: will prompt for password + device verification.
+./scripts/launch-chrome.sh https://accounts.google.com
+
+# Subsequent runs: reuse the same profile, skip the device challenge.
+PROFILE_DIR=~/my-agent-profile ./scripts/launch-chrome.sh https://youtube.com
+```
+
+The agent itself does not launch the browser — this helper just pairs a persistent profile with whatever Chrome-family binary is on your PATH (`google-chrome`, `chromium`, etc.).
+
+## System prerequisites
+
+- **`tesseract-ocr`** — required by the `CLICK_TEXT` primitive. On Debian/Ubuntu: `sudo apt-get install tesseract-ocr`. On macOS with Homebrew: `brew install tesseract`. If tesseract is missing, `CLICK_TEXT` silently logs a warning and falls back to the replan loop (it never crashes the agent).
 
 ## Safety notes
 

@@ -5,14 +5,69 @@ Uses the modern `google-genai` SDK (`pip install google-genai`).
 from __future__ import annotations
 
 import logging
+import random
 import re
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypeVar
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 from PIL import Image
 
 log = logging.getLogger(__name__)
+
+
+# Status codes that are considered transient: the model is up but busy or
+# rate-limited. We back off and retry these rather than crashing — the user
+# explicitly said: "do not fall back to another model, wait then try again".
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+T = TypeVar("T")
+
+
+def _call_with_retry(
+    fn: Callable[[], T],
+    *,
+    label: str,
+    max_attempts: int,
+    base_delay_seconds: float,
+    max_delay_seconds: float,
+) -> T:
+    """Invoke ``fn`` with exponential backoff on transient Gemini failures.
+
+    Retries on 429 / 5xx only. Non-retryable errors (bad API key, malformed
+    request) are re-raised immediately. Exponential backoff with full jitter:
+    sleep ~= random(0, min(max_delay, base * 2**attempt)).
+    """
+    last_exc: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except (genai_errors.ServerError, genai_errors.ClientError) as exc:
+            status = getattr(exc, "status_code", getattr(exc, "code", None))
+            if status not in _RETRYABLE_STATUS:
+                raise
+            last_exc = exc
+            if attempt == max_attempts - 1:
+                break
+            # Exponential backoff with full jitter.
+            cap = min(max_delay_seconds, base_delay_seconds * (2 ** attempt))
+            delay = random.uniform(0.0, cap)
+            log.warning(
+                "%s: %s %s — retry %d/%d after %.1fs",
+                label,
+                status,
+                type(exc).__name__,
+                attempt + 1,
+                max_attempts,
+                delay,
+            )
+            time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
 
 
 ACTION_SYSTEM_PROMPT = """You are a desktop automation agent. You see a screenshot of the user's screen and a single natural-language step to perform.
@@ -84,9 +139,20 @@ class VerificationResult:
 
 
 class GeminiClient:
-    def __init__(self, api_key: str, model_name: str = "gemini-3.1-flash-lite-preview") -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model_name: str = "gemini-3.1-flash-lite-preview",
+        *,
+        retry_max_attempts: int = 6,
+        retry_base_delay_seconds: float = 5.0,
+        retry_max_delay_seconds: float = 300.0,
+    ) -> None:
         self._client = genai.Client(api_key=api_key)
         self._model_name = model_name
+        self._retry_max_attempts = retry_max_attempts
+        self._retry_base_delay_seconds = retry_base_delay_seconds
+        self._retry_max_delay_seconds = retry_max_delay_seconds
         self._action_config = types.GenerateContentConfig(
             system_instruction=ACTION_SYSTEM_PROMPT,
         )
@@ -100,6 +166,25 @@ class GeminiClient:
             system_instruction=DISAMBIG_SYSTEM_PROMPT,
         )
         log.info("Initialized Gemini client with model=%s", model_name)
+
+    def _generate(
+        self,
+        label: str,
+        contents: list,
+        config: types.GenerateContentConfig,
+    ):
+        """Call Gemini with retry-on-503/429 and exponential backoff."""
+        return _call_with_retry(
+            lambda: self._client.models.generate_content(
+                model=self._model_name,
+                contents=contents,
+                config=config,
+            ),
+            label=label,
+            max_attempts=self._retry_max_attempts,
+            base_delay_seconds=self._retry_base_delay_seconds,
+            max_delay_seconds=self._retry_max_delay_seconds,
+        )
 
     def plan_action(
         self,
@@ -130,11 +215,7 @@ class GeminiClient:
         parts.append("Respond with ONE command only.")
         prompt = "\n\n".join(parts)
 
-        response = self._client.models.generate_content(
-            model=self._model_name,
-            contents=[prompt, screenshot],
-            config=self._action_config,
-        )
+        response = self._generate("plan_action", [prompt, screenshot], self._action_config)
         text = (response.text or "").strip()
         log.debug("plan_action response: %r", text)
         return text
@@ -146,11 +227,7 @@ class GeminiClient:
             "Did the screen state become consistent with the goal? "
             "Respond with a single VERDICT line."
         )
-        response = self._client.models.generate_content(
-            model=self._model_name,
-            contents=[prompt, screenshot],
-            config=self._verify_config,
-        )
+        response = self._generate("verify", [prompt, screenshot], self._verify_config)
         text = (response.text or "").strip()
         log.debug("verify response: %r", text)
         upper = text.upper()
@@ -180,11 +257,7 @@ class GeminiClient:
             "List plausible click targets on THIS CROP in 0-1000 coords, "
             "one `CLICK [X,Y]` per line, or `NONE`."
         )
-        response = self._client.models.generate_content(
-            model=self._model_name,
-            contents=[prompt, crop],
-            config=self._refine_config,
-        )
+        response = self._generate("refine_click", [prompt, crop], self._refine_config)
         text = (response.text or "").strip()
         log.debug("refine_click response: %r", text)
 
@@ -224,11 +297,7 @@ class GeminiClient:
             f"Which of the {num_candidates} numbered red rectangles best "
             "matches the step? Respond with `PICK [N]` only."
         )
-        response = self._client.models.generate_content(
-            model=self._model_name,
-            contents=[prompt, annotated_screenshot],
-            config=self._disambig_config,
-        )
+        response = self._generate("disambiguate", [prompt, annotated_screenshot], self._disambig_config)
         text = (response.text or "").strip()
         log.debug("disambiguate response: %r", text)
 

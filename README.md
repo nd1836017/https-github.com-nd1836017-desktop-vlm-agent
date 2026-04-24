@@ -13,6 +13,8 @@ A Python desktop automation agent that uses a **Gemini Flash** VLM as its "brain
 - **Replan-on-failure with budget** — when the verifier reports FAIL, the agent tells the VLM what went wrong and asks for a different action, up to `MAX_REPLANS_PER_STEP` times before halting. Avoids both premature halts and runaway retry loops.
 - **Checkpoint + resume** — after every verified step the progress is atomically written to a JSON state file. Long runs can be resumed from the last successful step with `python -m agent --resume`.
 - **Two-stage CLICK refinement** (optional) — when enabled, after the planner emits a coarse `CLICK [x,y]` the agent crops a `TWO_STAGE_CROP_SIZE_PX` × `TWO_STAGE_CROP_SIZE_PX` region around that point, asks the VLM to list all plausible targets matching the step, and (if multiple are returned) a second VLM call disambiguates by picking the right one. Dramatically cuts "missed the address bar"-style failures on dense / multi-hitbox UIs. Toggle per run with `--two-stage-click` / `--no-two-stage-click`, or globally via `ENABLE_TWO_STAGE_CLICK`.
+- **Human-like input cadence** (bot-detection dodge) — every `CLICK` is preceded by a random sleep in `[CLICK_MIN_DELAY_SECONDS, CLICK_MAX_DELAY_SECONDS]`, and every character of a `TYPE` is followed by a random sleep in `[TYPE_MIN_INTERVAL_SECONDS, TYPE_MAX_INTERVAL_SECONDS]`, so the automation doesn't present a perfectly uniform rhythm to heuristic bot detectors. Set the upper bound to `0` to disable.
+- **Retry-with-backoff on quota / unavailability** — transient Gemini errors (`429 RESOURCE_EXHAUSTED`, `503 UNAVAILABLE`, other `5xx`) are retried with exponential backoff + full jitter, capped by `GEMINI_RETRY_MAX_DELAY_SECONDS`, up to `GEMINI_RETRY_MAX_ATTEMPTS` times. The agent **never** falls back to a different model — it waits and retries on the pinned `GEMINI_MODEL`.
 - **Verification + halt** — after every action, a second VLM call checks that the screen state matches the goal; if the replan budget is exhausted, execution halts and the user is notified via the terminal.
 - **Failsafe** — `pyautogui.FAILSAFE = True` (move the mouse to a screen corner to abort).
 
@@ -82,6 +84,13 @@ Env vars (all optional except `GEMINI_API_KEY`):
 | `ENABLE_TWO_STAGE_CLICK` | `true` | Enable two-stage CLICK refinement (crop + VLM-refined pick + optional disambiguation). Overridable per run via `--two-stage-click` / `--no-two-stage-click`. |
 | `TWO_STAGE_CROP_SIZE_PX` | `300` | Side length (px) of the square cropped around the coarse click point for refinement. |
 | `MAX_CLICK_CANDIDATES` | `5` | Cap on the number of refined candidates to consider before disambiguation. |
+| `CLICK_MIN_DELAY_SECONDS` | `0.8` | Lower bound of the random pre-click sleep (bot-detection dodge). |
+| `CLICK_MAX_DELAY_SECONDS` | `2.0` | Upper bound of the random pre-click sleep. Set both to `0` to disable. |
+| `TYPE_MIN_INTERVAL_SECONDS` | `0.03` | Lower bound of the random per-keystroke pause during TYPE. |
+| `TYPE_MAX_INTERVAL_SECONDS` | `0.12` | Upper bound of the random per-keystroke pause. Set both to `0` to disable. |
+| `GEMINI_RETRY_MAX_ATTEMPTS` | `6` | Total attempts before giving up on a transient 429/5xx error. |
+| `GEMINI_RETRY_BASE_DELAY_SECONDS` | `5.0` | Base delay for exponential backoff (doubles each attempt). |
+| `GEMINI_RETRY_MAX_DELAY_SECONDS` | `300.0` | Cap on any single backoff interval (seconds). |
 | `LOG_LEVEL` | `INFO` | Standard Python logging level. |
 
 ## Write a task file

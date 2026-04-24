@@ -56,6 +56,8 @@ def _execute_click_two_stage(
     animation_buffer: float,
     crop_size_px: int,
     max_candidates: int,
+    click_min_delay_seconds: float = 0.0,
+    click_max_delay_seconds: float = 0.0,
 ) -> tuple[bool, str]:
     """Execute a CLICK using the two-stage (crop -> refine -> disambiguate) path.
 
@@ -101,7 +103,13 @@ def _execute_click_two_stage(
         f"{len(candidates)} cand)"
     )
     log.info("Action: %s", action_text)
-    execute_click_pixels(px, py, animation_buffer_seconds=animation_buffer)
+    execute_click_pixels(
+        px,
+        py,
+        animation_buffer_seconds=animation_buffer,
+        click_min_delay_seconds=click_min_delay_seconds,
+        click_max_delay_seconds=click_max_delay_seconds,
+    )
     return True, action_text
 
 
@@ -116,6 +124,10 @@ def _attempt_step(
     enable_two_stage_click: bool,
     two_stage_crop_size_px: int,
     max_click_candidates: int,
+    click_min_delay_seconds: float = 0.0,
+    click_max_delay_seconds: float = 0.0,
+    type_min_interval_seconds: float = 0.02,
+    type_max_interval_seconds: float = 0.02,
 ) -> tuple[VerificationResult, str]:
     """Run one plan/execute/verify attempt and return (verdict, action_text).
 
@@ -154,6 +166,8 @@ def _attempt_step(
                 animation_buffer=animation_buffer,
                 crop_size_px=two_stage_crop_size_px,
                 max_candidates=max_click_candidates,
+                click_min_delay_seconds=click_min_delay_seconds,
+                click_max_delay_seconds=click_max_delay_seconds,
             )
             if not ok:
                 # Refinement couldn't find a target — synthesize a FAIL verdict
@@ -168,7 +182,15 @@ def _attempt_step(
         else:
             action_text = render_command(cmd)
             log.info("Action: %s", action_text)
-            execute(cmd, geometry, animation_buffer_seconds=animation_buffer)
+            execute(
+                cmd,
+                geometry,
+                animation_buffer_seconds=animation_buffer,
+                click_min_delay_seconds=click_min_delay_seconds,
+                click_max_delay_seconds=click_max_delay_seconds,
+                type_min_interval_seconds=type_min_interval_seconds,
+                type_max_interval_seconds=type_max_interval_seconds,
+            )
 
         post_screenshot = capture_screenshot()
         verdict = vlm.verify(step, post_screenshot)
@@ -195,6 +217,10 @@ def run_step(
     enable_two_stage_click: bool = True,
     two_stage_crop_size_px: int = 300,
     max_click_candidates: int = 5,
+    click_min_delay_seconds: float = 0.0,
+    click_max_delay_seconds: float = 0.0,
+    type_min_interval_seconds: float = 0.02,
+    type_max_interval_seconds: float = 0.02,
 ) -> VerificationResult:
     """Run one step with up to `max_replans` replans on verify FAIL.
 
@@ -230,6 +256,10 @@ def run_step(
             enable_two_stage_click=enable_two_stage_click,
             two_stage_crop_size_px=two_stage_crop_size_px,
             max_click_candidates=max_click_candidates,
+            click_min_delay_seconds=click_min_delay_seconds,
+            click_max_delay_seconds=click_max_delay_seconds,
+            type_min_interval_seconds=type_min_interval_seconds,
+            type_max_interval_seconds=type_max_interval_seconds,
         )
         last_verdict = verdict
         last_action_text = action_text
@@ -291,6 +321,9 @@ def run(config: Config, resume: bool = False) -> int:
     vlm = GeminiClient(
         api_key=config.gemini_api_key,
         model_name=config.gemini_model,
+        retry_max_attempts=config.gemini_retry_max_attempts,
+        retry_base_delay_seconds=config.gemini_retry_base_delay_seconds,
+        retry_max_delay_seconds=config.gemini_retry_max_delay_seconds,
     )
     history = History(window=config.history_window)
 
@@ -318,6 +351,10 @@ def run(config: Config, resume: bool = False) -> int:
             enable_two_stage_click=config.enable_two_stage_click,
             two_stage_crop_size_px=config.two_stage_crop_size_px,
             max_click_candidates=config.max_click_candidates,
+            click_min_delay_seconds=config.click_min_delay_seconds,
+            click_max_delay_seconds=config.click_max_delay_seconds,
+            type_min_interval_seconds=config.type_min_interval_seconds,
+            type_max_interval_seconds=config.type_max_interval_seconds,
         )
 
         if not result.passed:

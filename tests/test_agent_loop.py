@@ -91,6 +91,13 @@ def _cfg(tmp_path, tasks_text: str, **overrides) -> Config:
         enable_two_stage_click=False,
         two_stage_crop_size_px=300,
         max_click_candidates=5,
+        click_min_delay_seconds=0.0,
+        click_max_delay_seconds=0.0,
+        type_min_interval_seconds=0.0,
+        type_max_interval_seconds=0.0,
+        gemini_retry_max_attempts=1,
+        gemini_retry_base_delay_seconds=0.0,
+        gemini_retry_max_delay_seconds=0.0,
         log_level="INFO",
     )
     defaults.update(overrides)

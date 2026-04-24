@@ -136,6 +136,7 @@ The VLM is instructed to respond with exactly one of:
 | `DRAG [X1,Y1,X2,Y2]` | `DRAG [100,200,500,600]` | Press at (X1,Y1), drag to (X2,Y2), release. |
 | `WAIT [SECONDS]` | `WAIT [2.5]` | Sleep `SECONDS` before the next step (capped at 60s). |
 | `CLICK_TEXT [LABEL]` | `CLICK_TEXT [Sign in]` | OCR the current screen and click the text whose label best matches `LABEL`. Deterministic for text targets — doesn't rely on the VLM's coordinate estimate at all. Requires `tesseract-ocr` installed. |
+| `PAUSE [REASON]` | `PAUSE [Approve sign-in on your phone]` | Halt the agent and wait for a human to resolve `REASON` (e.g. 2FA, CAPTCHA, "Verify it's you" prompts). The agent prints the reason, blocks on stdin, and resumes when you press Enter. Emitted automatically by the planner when it detects such prompts on screen. |
 
 The parser is lenient: it will still recover if the VLM omits brackets, wraps the command in prose, or uses parentheses instead of brackets. The legacy `CLICK`, `PRESS`, and `TYPE` paths are unchanged.
 
@@ -146,6 +147,32 @@ When `ENABLE_JSON_OUTPUT=true` (default) the planner and verifier ask Gemini for
 ### Global replan cap
 
 `MAX_TOTAL_REPLANS=10` (default) bounds replans across the entire run, not just per-step. When the cumulative replan count exceeds the cap, the agent halts with a clear "Global replan budget exhausted" message. Set to `0` to disable (legacy behavior: only the per-step cap applies).
+
+### Run artifacts
+
+Set `SAVE_RUN_ARTIFACTS=true` to capture every step of a run to `RUN_ARTIFACTS_DIR/<timestamp>/` (default `runs/`). Each step produces:
+
+```
+runs/20251201-193045/
+  step_001_before.png     # screenshot fed to the planner
+  step_001_after.png      # screenshot fed to the verifier
+  step_001_plan.txt       # raw VLM plan response + chosen action
+  step_001_verdict.txt    # PASS/FAIL + reason
+  step_002_before.png
+  ...
+  summary.json            # rolling per-step pass/fail list
+```
+
+Off by default — can fill disk on long runs. Flip it on when you need to debug a flaky step.
+
+### RPD (quota) guard
+
+`gemini-3.1-flash-lite-preview` has a 500 request-per-day free-tier limit, and the agent makes ~2 API calls per step (plan + verify, more with two-stage CLICK). The RPD guard tracks this run's calls and:
+
+- Logs a loud WARNING once usage crosses `RPD_WARN_THRESHOLD` (default 75%).
+- Halts cleanly between steps once usage crosses `RPD_HALT_THRESHOLD` (default 95%), with the checkpoint intact so `--resume` picks up later.
+
+Set `RPD_LIMIT=0` to disable both guards. Raise `RPD_LIMIT` if you've enabled paid-tier billing on your Google Cloud project (tens of thousands/day).
 
 ## Persistent browser profile
 

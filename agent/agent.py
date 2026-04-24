@@ -12,14 +12,17 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .artifacts import ArtifactWriter
 from .config import Config
+from .cost import RpdGuard
 from .executor import execute, execute_click_pixels
 from .history import History, render_command
 from .ocr import find_text_center
-from .parser import ClickCommand, ClickTextCommand, parse_command
+from .parser import ClickCommand, ClickTextCommand, PauseCommand, parse_command
 from .screen import (
     ScreenGeometry,
     annotate_candidates,
@@ -59,6 +62,41 @@ log = logging.getLogger(__name__)
 
 class AgentHalt(RuntimeError):
     """Raised when the verifier reports the screen state does not match the goal."""
+
+
+@dataclass
+class PauseRequested:
+    """Sentinel returned by ``_attempt_step`` when the planner emitted PAUSE.
+
+    The run loop unwraps this and prompts the human; it is not propagated
+    further as a verdict.
+    """
+
+    reason: str
+    raw: str
+
+
+def _handle_pause(reason: str) -> bool:
+    """Block on stdin until the user signals readiness to resume.
+
+    Returns True if the user wants to continue, False if they want to abort.
+    Visible to tests via the ``input`` builtin patch.
+    """
+    log.warning("Agent paused — waiting for human: %s", reason)
+    print(
+        "\n" + "=" * 60
+        + f"\n[!] PAUSE: {reason}\n"
+        + "    Resolve the prompt above (e.g. approve on your phone, solve\n"
+        + "    the captcha, etc.) and then press Enter to resume.\n"
+        + "    Type 'q' + Enter to abort the run instead.\n"
+        + "=" * 60,
+        file=sys.stderr,
+    )
+    try:
+        answer = input(">>> Resume? [Enter / q]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer != "q"
 
 
 def read_tasks(path: Path) -> list[str]:
@@ -201,7 +239,9 @@ def _attempt_step(
     type_min_interval_seconds: float = 0.02,
     type_max_interval_seconds: float = 0.02,
     log_redact_type: bool = True,
-) -> tuple[VerificationResult, str]:
+    artifact_writer: ArtifactWriter | None = None,
+    step_idx: int = 0,
+) -> tuple[VerificationResult | PauseRequested, str]:
     """Run one plan/execute/verify attempt and return (verdict, action_text).
 
     Handles parse-failure retry internally. `action_text` is the rendered
@@ -213,6 +253,8 @@ def _attempt_step(
     while attempts <= max_parse_retries:
         attempts += 1
         screenshot = capture_screenshot()
+        if artifact_writer is not None:
+            artifact_writer.save_before(step_idx, screenshot)
         raw, cmd = vlm.plan_action(
             step,
             screenshot,
@@ -230,6 +272,12 @@ def _attempt_step(
                 "retrying" if attempts <= max_parse_retries else "giving up",
             )
             continue
+
+        if isinstance(cmd, PauseCommand):
+            log.info("Planner emitted PAUSE: %s", cmd.reason)
+            if artifact_writer is not None:
+                artifact_writer.save_plan(step_idx, raw, f"PAUSE [{cmd.reason}]")
+            return PauseRequested(reason=cmd.reason, raw=raw), f"PAUSE [{cmd.reason}]"
 
         if isinstance(cmd, ClickTextCommand):
             ok, action_text = _execute_click_text(
@@ -286,8 +334,13 @@ def _attempt_step(
             )
 
         post_screenshot = capture_screenshot()
+        if artifact_writer is not None:
+            artifact_writer.save_after(step_idx, post_screenshot)
+            artifact_writer.save_plan(step_idx, raw, action_text)
         verdict = vlm.verify(step, post_screenshot)
         log.info("Verify: %s", verdict.reason)
+        if artifact_writer is not None:
+            artifact_writer.save_verdict(step_idx, verdict.passed, verdict.reason)
         return verdict, action_text
 
     return (
@@ -316,6 +369,9 @@ def run_step(
     type_max_interval_seconds: float = 0.02,
     log_redact_type: bool = True,
     replan_counter: ReplanCounter | None = None,
+    artifact_writer: ArtifactWriter | None = None,
+    step_idx: int = 0,
+    pause_handler: Callable[[str], bool] | None = None,
 ) -> VerificationResult:
     """Run one step with up to `max_replans` replans on verify FAIL.
 
@@ -331,8 +387,14 @@ def run_step(
     previous_failure = ""
     last_verdict: VerificationResult | None = None
     last_action_text = "<no-action>"
+    attempt_idx = 0
+    pauses_so_far = 0
+    # Hard safety: a single step shouldn't require more than this many human
+    # interventions; otherwise we're probably stuck in a PAUSE loop.
+    max_pauses_per_step = 10
 
-    for attempt_idx in range(1, total_attempts + 1):
+    while attempt_idx < total_attempts:
+        attempt_idx += 1
         # Global replan guard. The first attempt is NOT a replan, so only
         # consult / consume the budget on attempts 2+.
         if attempt_idx > 1 and replan_counter is not None:
@@ -377,7 +439,41 @@ def run_step(
             type_min_interval_seconds=type_min_interval_seconds,
             type_max_interval_seconds=type_max_interval_seconds,
             log_redact_type=log_redact_type,
+            artifact_writer=artifact_writer,
+            step_idx=step_idx,
         )
+
+        # PAUSE: ask the human, then loop back without consuming the
+        # replan budget — the screen state has changed (because the human
+        # acted), so a fresh plan attempt is the right thing.
+        if isinstance(verdict, PauseRequested):
+            pauses_so_far += 1
+            if pauses_so_far > max_pauses_per_step:
+                return VerificationResult(
+                    passed=False,
+                    reason=(
+                        f"Exceeded max PAUSE rounds ({max_pauses_per_step}) "
+                        f"on this step; last reason: {verdict.reason}"
+                    ),
+                )
+            handler = pause_handler or _handle_pause
+            should_continue = handler(verdict.reason)
+            history.record(
+                step,
+                action_text,
+                passed=False,
+                reason=f"PAUSE handled: {verdict.reason}",
+            )
+            if not should_continue:
+                return VerificationResult(
+                    passed=False,
+                    reason=f"User aborted at PAUSE: {verdict.reason}",
+                )
+            # Don't count this attempt against the replan budget — replan
+            # only fires on verifier FAILs, and PAUSE is neither.
+            attempt_idx -= 1
+            continue
+
         last_verdict = verdict
         last_action_text = action_text
 
@@ -435,6 +531,11 @@ def run(config: Config, resume: bool = False) -> int:
         state = AgentState.initial(config.tasks_file, len(steps))
 
     geometry = detect_geometry()
+    rpd_guard = RpdGuard(
+        rpd_limit=config.rpd_limit,
+        warn_threshold=config.rpd_warn_threshold,
+        halt_threshold=config.rpd_halt_threshold,
+    )
     vlm = GeminiClient(
         api_key=config.gemini_api_key,
         model_name=config.gemini_model,
@@ -442,9 +543,14 @@ def run(config: Config, resume: bool = False) -> int:
         retry_base_delay_seconds=config.gemini_retry_base_delay_seconds,
         retry_max_delay_seconds=config.gemini_retry_max_delay_seconds,
         enable_json_output=config.enable_json_output,
+        rpd_guard=rpd_guard,
     )
     history = History(window=config.history_window)
     replan_counter = ReplanCounter(total_max=config.max_total_replans)
+    artifact_writer = ArtifactWriter.create(
+        enabled=config.save_run_artifacts,
+        base_dir=config.run_artifacts_dir,
+    )
 
     log.info(
         "Loaded %d step(s) from %s (starting at step %d)",
@@ -476,6 +582,16 @@ def run(config: Config, resume: bool = False) -> int:
             type_max_interval_seconds=config.type_max_interval_seconds,
             log_redact_type=config.log_redact_type,
             replan_counter=replan_counter,
+            artifact_writer=artifact_writer,
+            step_idx=idx,
+        )
+
+        artifact_writer.append_summary(
+            step_idx=idx,
+            step_text=step,
+            action_text="<see step_NNN_plan.txt>",
+            passed=result.passed,
+            reason=result.reason,
         )
 
         if not result.passed:
@@ -496,6 +612,12 @@ def run(config: Config, resume: bool = False) -> int:
             save_state(config.state_file, state)
         except OSError as exc:
             log.warning("Failed to save checkpoint to %s: %s", config.state_file, exc)
+
+        # RPD guard: halt cleanly between steps so the checkpoint is consistent.
+        if rpd_guard.should_halt():
+            print("\n[!] " + rpd_guard.halt_message(), file=sys.stderr)
+            log.error("Halting execution: %s", rpd_guard.halt_message())
+            return 1
 
     log.info("All %d step(s) completed successfully.", len(steps))
     print(f"[ok] All {len(steps)} step(s) completed successfully.")

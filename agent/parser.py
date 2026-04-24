@@ -15,6 +15,8 @@ Supported commands:
     CLICK_TEXT [LABEL]          — click the center of the on-screen text that
                                   best matches LABEL. Uses OCR and falls back
                                   to replan when no match is found.
+    PAUSE [REASON]              — halt and wait for a human to resolve REASON
+                                  (e.g. a 2FA prompt, captcha) before resuming.
 
 The parser is defensive: it tolerates surrounding conversational text,
 case variations, and a few common bracket omissions. It never raises on
@@ -41,6 +43,7 @@ CommandType = Literal[
     "MOVE_TO",
     "WAIT",
     "CLICK_TEXT",
+    "PAUSE",
 ]
 
 
@@ -112,6 +115,12 @@ class ClickTextCommand:
     label: str = ""
 
 
+@dataclass(frozen=True)
+class PauseCommand:
+    kind: CommandType = "PAUSE"
+    reason: str = ""
+
+
 Command = (
     ClickCommand
     | DoubleClickCommand
@@ -123,6 +132,7 @@ Command = (
     | MoveToCommand
     | WaitCommand
     | ClickTextCommand
+    | PauseCommand
 )
 
 
@@ -164,6 +174,10 @@ _CLICK_TEXT_RE = re.compile(
     r"CLICK[_\s]?TEXT\s*\[\s*(.*?)\s*\]",
     re.IGNORECASE | re.DOTALL,
 )
+_PAUSE_RE = re.compile(
+    r"PAUSE\s*\[\s*(.*?)\s*\]",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 # --- Lenient fallbacks (missing brackets, common prose forms). ----------------
@@ -191,6 +205,12 @@ def parse_command(response: str) -> Command | None:
         return None
 
     try:
+        m = _PAUSE_RE.search(response)
+        if m:
+            reason = m.group(1).strip()
+            if reason:
+                return PauseCommand(reason=reason)
+
         # CLICK_TEXT must be tried before CLICK so the CLICK regex doesn't
         # mistakenly match prose inside a CLICK_TEXT label.
         m = _CLICK_TEXT_RE.search(response)

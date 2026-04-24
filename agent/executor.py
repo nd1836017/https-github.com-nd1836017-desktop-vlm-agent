@@ -32,6 +32,23 @@ def _is_animation_key(key: str) -> bool:
     return any(p in _ANIMATION_KEYS for p in parts)
 
 
+def execute_click_pixels(
+    px: int,
+    py: int,
+    animation_buffer_seconds: float = 1.5,
+) -> None:
+    """Click at absolute screen pixel coordinates and sleep the animation buffer.
+
+    Used by the two-stage CLICK path, where the refined pixel is computed
+    directly from a cropped region and we want to bypass the normalized
+    0-1000 round-trip (which would lose sub-unit precision).
+    """
+    pyautogui = _pyautogui()
+    log.info("CLICK pixels=(%d,%d)", px, py)
+    pyautogui.click(px, py)
+    time.sleep(animation_buffer_seconds)
+
+
 def execute(
     cmd: Command,
     geometry: ScreenGeometry,

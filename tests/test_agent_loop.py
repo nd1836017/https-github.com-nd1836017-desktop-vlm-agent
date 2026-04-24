@@ -85,6 +85,12 @@ def _cfg(tmp_path, tasks_text: str, **overrides) -> Config:
         max_replans_per_step=2,
         history_window=5,
         state_file=tmp_path / ".agent_state.json",
+        # Legacy-loop tests default to two-stage OFF so the FakeClient doesn't
+        # need to implement the refine/disambiguate surface. Two-stage gets
+        # its own dedicated test module.
+        enable_two_stage_click=False,
+        two_stage_crop_size_px=300,
+        max_click_candidates=5,
         log_level="INFO",
     )
     defaults.update(overrides)
@@ -108,6 +114,7 @@ def test_retry_on_parse_failure(fake_geometry, patch_pyautogui):
         max_parse_retries=1,
         max_replans=0,
         history=history,
+        enable_two_stage_click=False,
     )
     assert result.passed is True
     assert len(client.plan_calls) == 2
@@ -128,6 +135,7 @@ def test_parse_failure_exhausted_returns_fail(fake_geometry, patch_pyautogui):
         max_parse_retries=1,
         max_replans=0,
         history=History(window=0),
+        enable_two_stage_click=False,
     )
     assert result.passed is False
     assert "parse failure" in result.reason.lower()
@@ -157,6 +165,7 @@ def test_replan_succeeds_after_one_verification_failure(
         max_parse_retries=0,
         max_replans=2,
         history=history,
+        enable_two_stage_click=False,
     )
     assert result.passed is True
     assert len(client.plan_calls) == 2
@@ -188,6 +197,7 @@ def test_replan_budget_exhausts_and_halts(fake_geometry, patch_pyautogui):
         max_parse_retries=0,
         max_replans=2,
         history=history,
+        enable_two_stage_click=False,
     )
     assert result.passed is False
     assert len(client.plan_calls) == 3, "expected 1 initial + 2 replan attempts"

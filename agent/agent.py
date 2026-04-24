@@ -387,19 +387,24 @@ def run_step(
     previous_failure = ""
     last_verdict: VerificationResult | None = None
     last_action_text = "<no-action>"
-    attempt_idx = 0
+    # Number of real (non-PAUSE) attempts that have been consumed so far.
+    # PAUSE iterations do NOT advance this counter — a PAUSE means "human
+    # intervention changed the screen, so let me try again fresh" and must
+    # not eat into the replan budget. The old implementation incremented
+    # then decremented on PAUSE, which was fragile (an off-by-one near the
+    # final slot could make `while attempt_idx < total_attempts` exit one
+    # iteration early and starve the last replan).
+    attempts_used = 0
     pauses_so_far = 0
     # Hard safety: a single step shouldn't require more than this many human
     # interventions; otherwise we're probably stuck in a PAUSE loop.
     max_pauses_per_step = 10
 
-    while attempt_idx < total_attempts:
-        attempt_idx += 1
-        # Global replan guard. The first attempt is NOT a replan, so only
-        # consult the budget on attempts 2+. The budget is *consumed* below
-        # AFTER we know the attempt wasn't a PAUSE — PAUSE iterations roll
-        # `attempt_idx` back and must not permanently drain the global
-        # counter (see PR #7 review).
+    while attempts_used < total_attempts:
+        # `attempt_idx` is the 1-indexed number of the attempt we're about
+        # to make (for logging / budget messages). The first attempt is
+        # not a replan; attempts 2+ are.
+        attempt_idx = attempts_used + 1
         is_replan_attempt = attempt_idx > 1
         if (
             is_replan_attempt
@@ -451,7 +456,11 @@ def run_step(
 
         # PAUSE: ask the human, then loop back without consuming the
         # replan budget — the screen state has changed (because the human
-        # acted), so a fresh plan attempt is the right thing.
+        # acted), so a fresh plan attempt is the right thing. Crucially,
+        # `attempts_used` is NOT incremented on PAUSE, so the `while`
+        # condition stays fresh and we don't starve the last replan slot
+        # (only `pauses_so_far` / `max_pauses_per_step` bounds the loop
+        # when PAUSE storms would otherwise spin forever).
         if isinstance(verdict, PauseRequested):
             pauses_so_far += 1
             if pauses_so_far > max_pauses_per_step:
@@ -475,17 +484,12 @@ def run_step(
                     passed=False,
                     reason=f"User aborted at PAUSE: {verdict.reason}",
                 )
-            # Don't count this attempt against the replan budget — replan
-            # only fires on verifier FAILs, and PAUSE is neither. The
-            # global replan counter has NOT yet been incremented for this
-            # iteration (it's consumed below only on non-PAUSE attempts),
-            # so no rollback is needed.
-            attempt_idx -= 1
             continue
 
-        # Non-PAUSE outcome: if this was a replan attempt (2+), consume
-        # one slot of the global replan budget now — exactly once per
-        # real replan iteration, regardless of PAUSE storms above.
+        # Non-PAUSE outcome: this was a real attempt. Consume one slot
+        # of both the per-step budget (via `attempts_used`) and — when
+        # applicable — the global replan budget.
+        attempts_used += 1
         if is_replan_attempt and replan_counter is not None:
             replan_counter.record_replan()
 

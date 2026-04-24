@@ -49,7 +49,7 @@ class Config:
                 "GEMINI_API_KEY is not set. Copy .env.example to .env and fill it in."
             )
 
-        return cls(
+        cfg = cls(
             gemini_api_key=api_key,
             gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview").strip(),
             tasks_file=Path(os.getenv("TASKS_FILE", "tasks.txt")).expanduser(),
@@ -86,6 +86,12 @@ class Config:
             rpd_halt_threshold=float(os.getenv("RPD_HALT_THRESHOLD", "0.95")),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         )
+        if cfg.rpd_warn_threshold >= cfg.rpd_halt_threshold:
+            raise ValueError(
+                f"RPD_WARN_THRESHOLD ({cfg.rpd_warn_threshold}) must be "
+                f"less than RPD_HALT_THRESHOLD ({cfg.rpd_halt_threshold})"
+            )
+        return cfg
 
 
 def _env_bool(name: str, *, default: bool) -> bool:

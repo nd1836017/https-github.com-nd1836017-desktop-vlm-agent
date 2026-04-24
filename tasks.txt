@@ -1,0 +1,3 @@
+Press Ctrl+L to focus the browser's address bar
+Type example.com
+Press the Enter key to navigate to the URL

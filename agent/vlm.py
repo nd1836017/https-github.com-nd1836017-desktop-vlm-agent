@@ -52,7 +52,7 @@ class VerificationResult:
 
 
 class GeminiClient:
-    def __init__(self, api_key: str, model_name: str = "gemini-2.5-flash-lite") -> None:
+    def __init__(self, api_key: str, model_name: str = "gemini-3.1-flash-lite-preview") -> None:
         self._client = genai.Client(api_key=api_key)
         self._model_name = model_name
         self._action_config = types.GenerateContentConfig(

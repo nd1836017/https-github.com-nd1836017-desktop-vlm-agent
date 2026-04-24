@@ -68,7 +68,7 @@ Env vars (all optional except `GEMINI_API_KEY`):
 | Variable | Default | Description |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | — | **Required.** API key for Google AI Studio. |
-| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Any Gemini vision-capable model (e.g. `gemini-2.5-flash`, `gemini-2.5-flash-lite`). Lite = cheaper + higher free-tier quota. |
+| `GEMINI_MODEL` | `gemini-3.1-flash-lite-preview` | Any Gemini vision-capable model (e.g. `gemini-3.1-flash-lite-preview`, `gemini-2.5-flash-lite`, `gemini-2.5-flash`). Lite = cheaper + higher free-tier quota. |
 | `TASKS_FILE` | `tasks.txt` | Path to the instructions file. |
 | `ANIMATION_BUFFER_SECONDS` | `1.5` | Sleep after CLICK / PRESS [win]. |
 | `MAX_STEP_RETRIES` | `1` | Retries per step on parse failure. |

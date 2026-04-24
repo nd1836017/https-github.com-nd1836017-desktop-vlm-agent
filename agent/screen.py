@@ -176,9 +176,15 @@ def annotate_candidates(
         right, bottom = px + half, py + half
         # Red rectangle outline.
         draw.rectangle((left, top, right, bottom), outline=(255, 0, 0), width=4)
-        # White-filled badge with the 1-based number.
+        # White-filled badge with the 1-based number. Keep the badge a
+        # fixed 32x34 rectangle that sits above the candidate's top edge,
+        # clamped to the image bounds. The old `max(0, top-34), max(34, top)`
+        # pair would collapse to zero height when `top` was near 0 (both
+        # edges pinned to 0 or both pinned to 34), hiding the badge.
         label = str(idx)
-        label_box = (left, max(0, top - 34), left + 32, max(34, top))
+        badge_top = max(0, top - 34)
+        badge_bottom = badge_top + 34
+        label_box = (left, badge_top, left + 32, badge_bottom)
         draw.rectangle(label_box, fill=(255, 255, 255), outline=(255, 0, 0), width=2)
         draw.text(
             (label_box[0] + 6, label_box[1] + 2),

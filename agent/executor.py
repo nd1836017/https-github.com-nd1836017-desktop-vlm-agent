@@ -84,6 +84,48 @@ def _human_type_interval(
     return random.uniform(lo, hi)
 
 
+def _is_typewrite_safe(char: str) -> bool:
+    """True when ``pyautogui.typewrite`` can reliably emit ``char``.
+
+    ``typewrite`` uses a US-keyboard key map and silently discards any
+    character it can't map (anything with ord > 127, tabs, newlines, ...).
+    We treat printable ASCII plus the couple of whitespace chars pyautogui
+    actually handles as safe; anything else gets the clipboard-paste path.
+    """
+    if len(char) != 1:
+        return False
+    if char in ("\n", "\t"):
+        return True
+    return 32 <= ord(char) <= 126
+
+
+def _paste_char(pyautogui_module, char: str, *, redact: bool) -> None:
+    """Paste a single char via the clipboard + Ctrl+V.
+
+    Falls back to a warning log if ``pyperclip`` isn't installed or the
+    clipboard is unavailable (headless CI with no X11 clipboard, etc.).
+    Never raises — typing is best-effort by design.
+    """
+    try:
+        import pyperclip
+    except ImportError:
+        log.warning(
+            "TYPE: non-ASCII char %s dropped (pyperclip not installed)",
+            "<REDACTED>" if redact else repr(char),
+        )
+        return
+    try:
+        pyperclip.copy(char)
+    except pyperclip.PyperclipException as exc:  # type: ignore[attr-defined]
+        log.warning(
+            "TYPE: non-ASCII char %s dropped (clipboard unavailable: %s)",
+            "<REDACTED>" if redact else repr(char),
+            exc,
+        )
+        return
+    pyautogui_module.hotkey("ctrl", "v")
+
+
 def execute_click_pixels(
     px: int,
     py: int,
@@ -228,8 +270,16 @@ def execute(
         # Per-character jittered interval to avoid perfectly-uniform typing
         # cadence that is trivial for bot detectors to flag. pyautogui's
         # typewrite only accepts a fixed interval, so we loop ourselves.
+        # pyautogui.typewrite silently drops any char outside its
+        # US-keyboard map (anything with ord > 127, plus some punctuation).
+        # For those we copy the char to the clipboard and paste with
+        # Ctrl+V so non-ASCII text (emoji, accented chars, CJK, etc.)
+        # actually lands in the target field instead of vanishing.
         for char in cmd.text:
-            pyautogui.typewrite(char, interval=0)
+            if _is_typewrite_safe(char):
+                pyautogui.typewrite(char, interval=0)
+            else:
+                _paste_char(pyautogui, char, redact=log_redact_type)
             interval = _human_type_interval(
                 type_min_interval_seconds, type_max_interval_seconds
             )

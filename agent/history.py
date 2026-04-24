@@ -6,7 +6,7 @@ records so it can reason about what has already happened and avoid loops.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from .parser import (
@@ -92,7 +92,7 @@ class History:
             )
         )
 
-    def __iter__(self) -> Iterable[StepRecord]:
+    def __iter__(self) -> Iterator[StepRecord]:
         return iter(self._records)
 
     def __len__(self) -> int:

@@ -71,6 +71,30 @@ class PlanResponseModel(BaseModel):
     )
 
 
+# Fences look like ```json\n...\n``` or ```YAML\n...\n``` or just ```\n...\n```.
+# We strip any optional opening ```<language-tag>\n and trailing ``` in one shot.
+# Handles any language tag (json, JSON, yaml, ...) or no tag at all. The old
+# implementation did `stripped.strip("`")` which removed *all* backticks
+# (including ones inside the JSON!) and only stripped a lowercase "json"
+# prefix, so `\`\`\`JSON\n...\n\`\`\`` left a bogus "JSON" at the start of the payload.
+_MARKDOWN_FENCE_OPEN_RE = re.compile(r"^```[a-zA-Z]*\n?")
+_MARKDOWN_FENCE_CLOSE_RE = re.compile(r"\n?```\s*$")
+
+
+def _strip_markdown_fences(text: str) -> str:
+    r"""Strip an optional ```<lang>\n ... \n``` fence from ``text``.
+
+    Handles any language tag (case-insensitive) or none. Leaves text
+    without a fence unchanged.
+    """
+    stripped = (text or "").strip()
+    if not stripped.startswith("```"):
+        return stripped
+    without_open = _MARKDOWN_FENCE_OPEN_RE.sub("", stripped, count=1)
+    without_close = _MARKDOWN_FENCE_CLOSE_RE.sub("", without_open, count=1)
+    return without_close.strip()
+
+
 def _parse_plan_response_json(text: str) -> PlanResponseModel | None:
     """Best-effort JSON -> PlanResponseModel when the SDK didn't populate `.parsed`.
 
@@ -82,16 +106,9 @@ def _parse_plan_response_json(text: str) -> PlanResponseModel | None:
     designed for free-form text and won't extract anything useful from
     a JSON blob.
     """
-    stripped = (text or "").strip()
+    stripped = _strip_markdown_fences(text)
     if not stripped:
         return None
-    # Strip optional markdown fences the model sometimes adds despite the
-    # mime_type hint.
-    if stripped.startswith("```"):
-        stripped = stripped.strip("`")
-        if stripped.lower().startswith("json"):
-            stripped = stripped[4:]
-        stripped = stripped.strip()
     try:
         payload = json.loads(stripped)
     except (json.JSONDecodeError, ValueError):
@@ -113,14 +130,9 @@ def _parse_verify_response_json(text: str) -> VerifyResponseModel | None:
     regex-searched for ``VERDICT: PASS`` (which it never contains),
     producing a bogus "Unparseable" FAIL.
     """
-    stripped = (text or "").strip()
+    stripped = _strip_markdown_fences(text)
     if not stripped:
         return None
-    if stripped.startswith("```"):
-        stripped = stripped.strip("`")
-        if stripped.lower().startswith("json"):
-            stripped = stripped[4:]
-        stripped = stripped.strip()
     try:
         payload = json.loads(stripped)
     except (json.JSONDecodeError, ValueError):

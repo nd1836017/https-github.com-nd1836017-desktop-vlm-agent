@@ -1,4 +1,7 @@
 .env
+.agent_state.json
+tasks_yt_login.txt
+tasks_*_rendered.txt
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -10,4 +13,5 @@ venv/
 screenshots/
 logs/
 *.log
+runs/
 .DS_Store

@@ -30,7 +30,7 @@ class Config:
 
         return cls(
             gemini_api_key=api_key,
-            gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip(),
+            gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite").strip(),
             tasks_file=Path(os.getenv("TASKS_FILE", "tasks.txt")).expanduser(),
             animation_buffer_seconds=float(
                 os.getenv("ANIMATION_BUFFER_SECONDS", "1.5")

@@ -109,6 +109,39 @@ def test_pause_user_aborts(fake_geometry):
     assert "Solve captcha" in verdict.reason
 
 
+def test_pause_on_replan_does_not_double_count_global_replans(fake_geometry):
+    # Attempt 1 verifier FAILs -> agent replans.
+    # Attempt 2 planner emits PAUSE -> handler says continue -> attempt_idx
+    # is rolled back so the agent can re-plan against the post-human state
+    # without this PAUSE iteration permanently consuming a replan slot.
+    # Attempt 2 (retried) emits a real action that PASSes.
+    # End state: exactly ONE logical replan occurred (the FAIL -> retry).
+    client = _FakeClient(
+        plans=["PRESS [a]", "PAUSE [approve on phone]", "PRESS [b]"],
+        verdicts=[(False, "first action missed"), (True, "ok")],
+    )
+    counter = ReplanCounter(total_max=10)
+    verdict = run_step(
+        step="do the thing",
+        vlm=client,
+        geometry=fake_geometry,
+        animation_buffer=0.0,
+        max_parse_retries=0,
+        max_replans=2,
+        history=History(window=5),
+        enable_two_stage_click=False,
+        replan_counter=counter,
+        pause_handler=lambda _reason: True,
+    )
+    assert verdict.passed
+    # Before the fix, PAUSE-during-replan double-consumed the counter so this
+    # assertion would see total_used == 2.
+    assert counter.total_used == 1, (
+        f"PAUSE on a replan attempt must not double-consume the global replan "
+        f"budget; expected total_used=1, got {counter.total_used}"
+    )
+
+
 def test_pause_storm_is_bounded(fake_geometry):
     # 50 consecutive PAUSEs — the step should halt cleanly after 10.
     client = _FakeClient(

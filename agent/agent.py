@@ -396,25 +396,31 @@ def run_step(
     while attempt_idx < total_attempts:
         attempt_idx += 1
         # Global replan guard. The first attempt is NOT a replan, so only
-        # consult / consume the budget on attempts 2+.
-        if attempt_idx > 1 and replan_counter is not None:
-            if not replan_counter.can_replan():
-                log.error(
-                    "Global replan budget exhausted (%d/%d used); halting.",
-                    replan_counter.total_used,
-                    replan_counter.total_max,
-                )
-                halted = VerificationResult(
-                    passed=False,
-                    reason=(
-                        f"Global replan budget exhausted "
-                        f"({replan_counter.total_used}/{replan_counter.total_max}). "
-                        f"Last failure: {last_verdict.reason if last_verdict else 'n/a'}"
-                    ),
-                )
-                history.record(step, last_action_text, passed=False, reason=halted.reason)
-                return halted
-            replan_counter.record_replan()
+        # consult the budget on attempts 2+. The budget is *consumed* below
+        # AFTER we know the attempt wasn't a PAUSE — PAUSE iterations roll
+        # `attempt_idx` back and must not permanently drain the global
+        # counter (see PR #7 review).
+        is_replan_attempt = attempt_idx > 1
+        if (
+            is_replan_attempt
+            and replan_counter is not None
+            and not replan_counter.can_replan()
+        ):
+            log.error(
+                "Global replan budget exhausted (%d/%d used); halting.",
+                replan_counter.total_used,
+                replan_counter.total_max,
+            )
+            halted = VerificationResult(
+                passed=False,
+                reason=(
+                    f"Global replan budget exhausted "
+                    f"({replan_counter.total_used}/{replan_counter.total_max}). "
+                    f"Last failure: {last_verdict.reason if last_verdict else 'n/a'}"
+                ),
+            )
+            history.record(step, last_action_text, passed=False, reason=halted.reason)
+            return halted
 
         log.info(
             "Step attempt %d/%d (replan budget: %d remaining)",
@@ -470,9 +476,18 @@ def run_step(
                     reason=f"User aborted at PAUSE: {verdict.reason}",
                 )
             # Don't count this attempt against the replan budget — replan
-            # only fires on verifier FAILs, and PAUSE is neither.
+            # only fires on verifier FAILs, and PAUSE is neither. The
+            # global replan counter has NOT yet been incremented for this
+            # iteration (it's consumed below only on non-PAUSE attempts),
+            # so no rollback is needed.
             attempt_idx -= 1
             continue
+
+        # Non-PAUSE outcome: if this was a replan attempt (2+), consume
+        # one slot of the global replan budget now — exactly once per
+        # real replan iteration, regardless of PAUSE storms above.
+        if is_replan_attempt and replan_counter is not None:
+            replan_counter.record_replan()
 
         last_verdict = verdict
         last_action_text = action_text

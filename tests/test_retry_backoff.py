@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 from google.genai import errors as genai_errors
 
+from agent.cost import RpdGuard
 from agent.vlm import _RETRYABLE_STATUS, _call_with_retry
 
 
@@ -104,6 +105,75 @@ def test_backoff_is_capped_by_max_delay():
         )
 
     assert captured == [10.0, 20.0, 30.0, 30.0]
+
+
+def test_rpd_guard_counts_each_retry_attempt():
+    # A single logical request that takes 3 real HTTP attempts (2 transient
+    # failures + 1 success) must consume 3 slots of the RPD counter — not 1.
+    guard = RpdGuard(rpd_limit=100)
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _server_error(503)
+        return "OK"
+
+    with patch("agent.vlm.time.sleep"):
+        result = _call_with_retry(
+            fn,
+            label="plan",
+            max_attempts=5,
+            base_delay_seconds=0.1,
+            max_delay_seconds=1.0,
+            rpd_guard=guard,
+        )
+
+    assert result == "OK"
+    assert calls["n"] == 3
+    # Guard sees every real HTTP attempt, matching the quota billed by Google.
+    assert guard.calls == 3, (
+        f"RPD guard must record every retry; expected 3, got {guard.calls}"
+    )
+
+
+def test_rpd_guard_records_even_when_all_attempts_fail():
+    guard = RpdGuard(rpd_limit=100)
+
+    def fn():
+        raise _client_error(429)
+
+    with patch("agent.vlm.time.sleep"), pytest.raises(genai_errors.ClientError):
+        _call_with_retry(
+            fn,
+            label="plan",
+            max_attempts=4,
+            base_delay_seconds=0.1,
+            max_delay_seconds=1.0,
+            rpd_guard=guard,
+        )
+    assert guard.calls == 4
+
+
+def test_rpd_guard_skipped_when_none():
+    # Backwards-compat: omitting rpd_guard must still work.
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        return "OK"
+
+    assert (
+        _call_with_retry(
+            fn,
+            label="plan",
+            max_attempts=3,
+            base_delay_seconds=0.1,
+            max_delay_seconds=1.0,
+        )
+        == "OK"
+    )
+    assert calls["n"] == 1
 
 
 @pytest.mark.parametrize("code", sorted(_RETRYABLE_STATUS))

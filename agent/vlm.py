@@ -137,15 +137,22 @@ def _call_with_retry(
     max_attempts: int,
     base_delay_seconds: float,
     max_delay_seconds: float,
+    rpd_guard: RpdGuard | None = None,
 ) -> T:
     """Invoke ``fn`` with exponential backoff on transient Gemini failures.
 
     Retries on 429 / 5xx only. Non-retryable errors (bad API key, malformed
     request) are re-raised immediately. Exponential backoff with full jitter:
     sleep ~= random(0, min(max_delay, base * 2**attempt)).
+
+    When ``rpd_guard`` is provided, ``record()`` is called once before every
+    attempt (including retries) so the RPD counter matches the real number
+    of outbound HTTP requests, not just the number of logical calls.
     """
     last_exc: Exception | None = None
     for attempt in range(max_attempts):
+        if rpd_guard is not None:
+            rpd_guard.record()
         try:
             return fn()
         except (genai_errors.ServerError, genai_errors.ClientError) as exc:
@@ -307,8 +314,12 @@ class GeminiClient:
         contents: list,
         config: types.GenerateContentConfig,
     ):
-        """Call Gemini with retry-on-503/429 and exponential backoff."""
-        self._rpd_guard.record()
+        """Call Gemini with retry-on-503/429 and exponential backoff.
+
+        The RPD guard is recorded inside ``_call_with_retry`` so every real
+        HTTP attempt is counted — a single logical request that takes five
+        retries to succeed consumes five slots of daily quota.
+        """
         return _call_with_retry(
             lambda: self._client.models.generate_content(
                 model=self._model_name,
@@ -319,6 +330,7 @@ class GeminiClient:
             max_attempts=self._retry_max_attempts,
             base_delay_seconds=self._retry_base_delay_seconds,
             max_delay_seconds=self._retry_max_delay_seconds,
+            rpd_guard=self._rpd_guard,
         )
 
     def plan_action(

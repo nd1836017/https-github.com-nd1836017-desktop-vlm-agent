@@ -32,6 +32,11 @@ class Config:
     log_redact_type: bool
     enable_json_output: bool
     max_total_replans: int
+    save_run_artifacts: bool
+    run_artifacts_dir: Path
+    rpd_limit: int
+    rpd_warn_threshold: float
+    rpd_halt_threshold: float
     log_level: str
 
     @classmethod
@@ -72,6 +77,13 @@ class Config:
             log_redact_type=_env_bool("LOG_REDACT_TYPE", default=True),
             enable_json_output=_env_bool("ENABLE_JSON_OUTPUT", default=True),
             max_total_replans=int(os.getenv("MAX_TOTAL_REPLANS", "10")),
+            save_run_artifacts=_env_bool("SAVE_RUN_ARTIFACTS", default=False),
+            run_artifacts_dir=Path(
+                os.getenv("RUN_ARTIFACTS_DIR", "runs")
+            ).expanduser(),
+            rpd_limit=int(os.getenv("RPD_LIMIT", "500")),
+            rpd_warn_threshold=float(os.getenv("RPD_WARN_THRESHOLD", "0.75")),
+            rpd_halt_threshold=float(os.getenv("RPD_HALT_THRESHOLD", "0.95")),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         )
 

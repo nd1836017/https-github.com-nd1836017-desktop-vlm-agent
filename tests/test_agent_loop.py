@@ -106,6 +106,11 @@ def _cfg(tmp_path, tasks_text: str, **overrides) -> Config:
         log_redact_type=True,
         enable_json_output=False,
         max_total_replans=0,
+        save_run_artifacts=False,
+        run_artifacts_dir=tmp_path / "runs",
+        rpd_limit=0,
+        rpd_warn_threshold=0.75,
+        rpd_halt_threshold=0.95,
         log_level="INFO",
     )
     defaults.update(overrides)

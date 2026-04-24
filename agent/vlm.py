@@ -18,6 +18,7 @@ from google.genai import types
 from PIL import Image
 from pydantic import BaseModel, Field
 
+from .cost import RpdGuard
 from .parser import (
     ClickCommand,
     ClickTextCommand,
@@ -25,6 +26,7 @@ from .parser import (
     DoubleClickCommand,
     DragCommand,
     MoveToCommand,
+    PauseCommand,
     PressCommand,
     RightClickCommand,
     ScrollCommand,
@@ -46,7 +48,8 @@ class PlanResponseModel(BaseModel):
     command: str = Field(
         description=(
             "The action kind. Must be one of: CLICK, DOUBLE_CLICK, "
-            "RIGHT_CLICK, MOVE_TO, PRESS, TYPE, SCROLL, DRAG, WAIT, CLICK_TEXT."
+            "RIGHT_CLICK, MOVE_TO, PRESS, TYPE, SCROLL, DRAG, WAIT, "
+            "CLICK_TEXT, PAUSE."
         )
     )
     x: int | None = Field(default=None, description="Normalized X in [0,1000].")
@@ -61,6 +64,10 @@ class PlanResponseModel(BaseModel):
     y2: int | None = Field(default=None, description="DRAG end Y.")
     seconds: float | None = Field(default=None, description="Seconds for WAIT.")
     label: str | None = Field(default=None, description="Text label for CLICK_TEXT.")
+    reason: str | None = Field(
+        default=None,
+        description="Human-readable reason for PAUSE (e.g. 'Verify it's you prompt').",
+    )
 
 
 def plan_response_to_command(resp: PlanResponseModel) -> Command | None:
@@ -102,6 +109,8 @@ def plan_response_to_command(resp: PlanResponseModel) -> Command | None:
             return WaitCommand(seconds=float(resp.seconds))
         if kind == "CLICK_TEXT" and resp.label:
             return ClickTextCommand(label=resp.label.strip())
+        if kind == "PAUSE" and resp.reason:
+            return PauseCommand(reason=resp.reason.strip())
     except (TypeError, ValueError) as exc:
         log.warning("plan_response_to_command: bad payload: %s", exc)
         return None
@@ -128,15 +137,22 @@ def _call_with_retry(
     max_attempts: int,
     base_delay_seconds: float,
     max_delay_seconds: float,
+    rpd_guard: RpdGuard | None = None,
 ) -> T:
     """Invoke ``fn`` with exponential backoff on transient Gemini failures.
 
     Retries on 429 / 5xx only. Non-retryable errors (bad API key, malformed
     request) are re-raised immediately. Exponential backoff with full jitter:
     sleep ~= random(0, min(max_delay, base * 2**attempt)).
+
+    When ``rpd_guard`` is provided, ``record()`` is called once before every
+    attempt (including retries) so the RPD counter matches the real number
+    of outbound HTTP requests, not just the number of logical calls.
     """
     last_exc: Exception | None = None
     for attempt in range(max_attempts):
+        if rpd_guard is not None:
+            rpd_guard.record()
         try:
             return fn()
         except (genai_errors.ServerError, genai_errors.ClientError) as exc:
@@ -177,6 +193,7 @@ RESPOND WITH EXACTLY ONE COMMAND on its own line, chosen from:
     DRAG [X1,Y1,X2,Y2]       — press at (X1,Y1), drag to (X2,Y2), release. Use for sliders, drag-to-select, drag-and-drop.
     WAIT [SECONDS]           — sleep SECONDS (float, capped at 60) before the next step. Use when waiting for a page to load or an animation to finish.
     CLICK_TEXT [LABEL]       — click the on-screen text whose label best matches LABEL. Use ONLY for text-labeled UI (buttons, links) where you can read the exact label. Do NOT use for icon-only targets.
+    PAUSE [REASON]           — halt and wait for a human to resolve REASON. EMIT THIS WHENEVER you see a screen that requires manual user action that the agent cannot perform: 2FA / device-approval prompts ("Verify it's you", "Check your phone", "Enter the code we sent"), CAPTCHA / "I'm not a robot" challenges, security questions, or any "browser may not be secure" warning. REASON must be a short human-readable string explaining what the user needs to do. Example: PAUSE [Approve the sign-in on your phone, then resume].
 
 Rules:
 - Output ONLY the command, wrapped in square brackets. No prose, no markdown, no explanation.
@@ -184,6 +201,7 @@ Rules:
 - Prefer CLICK for ordinary buttons/links. Use DOUBLE_CLICK only when the UI requires it (desktop icons, file-manager rows).
 - If the step has already been completed, still emit a single no-op friendly command (e.g. WAIT [0.5]) — never output nothing.
 - You may be shown a summary of previous steps and a previous-attempt failure reason. Use them to avoid repeating mistakes and to pick a DIFFERENT action when replanning after a failure.
+- NEVER attempt to bypass a 2FA or CAPTCHA challenge yourself. ALWAYS emit PAUSE [reason] in that situation — a human will resolve it and resume the agent.
 """
 
 
@@ -249,6 +267,7 @@ class GeminiClient:
         retry_base_delay_seconds: float = 5.0,
         retry_max_delay_seconds: float = 300.0,
         enable_json_output: bool = True,
+        rpd_guard: RpdGuard | None = None,
     ) -> None:
         self._client = genai.Client(api_key=api_key)
         self._model_name = model_name
@@ -256,6 +275,7 @@ class GeminiClient:
         self._retry_base_delay_seconds = retry_base_delay_seconds
         self._retry_max_delay_seconds = retry_max_delay_seconds
         self._enable_json_output = enable_json_output
+        self._rpd_guard = rpd_guard or RpdGuard()
         self._action_config = types.GenerateContentConfig(
             system_instruction=ACTION_SYSTEM_PROMPT,
         )
@@ -284,13 +304,22 @@ class GeminiClient:
             enable_json_output,
         )
 
+    @property
+    def rpd_guard(self) -> RpdGuard:
+        return self._rpd_guard
+
     def _generate(
         self,
         label: str,
         contents: list,
         config: types.GenerateContentConfig,
     ):
-        """Call Gemini with retry-on-503/429 and exponential backoff."""
+        """Call Gemini with retry-on-503/429 and exponential backoff.
+
+        The RPD guard is recorded inside ``_call_with_retry`` so every real
+        HTTP attempt is counted — a single logical request that takes five
+        retries to succeed consumes five slots of daily quota.
+        """
         return _call_with_retry(
             lambda: self._client.models.generate_content(
                 model=self._model_name,
@@ -301,6 +330,7 @@ class GeminiClient:
             max_attempts=self._retry_max_attempts,
             base_delay_seconds=self._retry_base_delay_seconds,
             max_delay_seconds=self._retry_max_delay_seconds,
+            rpd_guard=self._rpd_guard,
         )
 
     def plan_action(

@@ -16,6 +16,7 @@ from .parser import (
     DoubleClickCommand,
     DragCommand,
     MoveToCommand,
+    PauseCommand,
     PressCommand,
     RightClickCommand,
     ScrollCommand,
@@ -61,6 +62,8 @@ def render_command(cmd: Command, *, redact_type: bool = False) -> str:
         return f"WAIT [{cmd.seconds}]"
     if isinstance(cmd, ClickTextCommand):
         return f"CLICK_TEXT [{cmd.label}]"
+    if isinstance(cmd, PauseCommand):
+        return f"PAUSE [{cmd.reason}]"
     return str(cmd)
 
 

@@ -13,4 +13,5 @@ venv/
 screenshots/
 logs/
 *.log
+runs/
 .DS_Store

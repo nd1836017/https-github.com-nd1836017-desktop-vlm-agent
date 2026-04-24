@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from agent.parser import (
     ClickCommand,
+    ClickTextCommand,
     DoubleClickCommand,
     DragCommand,
     MoveToCommand,
@@ -211,3 +212,26 @@ def test_wait_with_seconds_unit():
     cmd = parse_command("WAIT [2s]")
     assert isinstance(cmd, WaitCommand)
     assert cmd.seconds == 2.0
+
+
+def test_click_text_simple():
+    cmd = parse_command("CLICK_TEXT [Sign in]")
+    assert isinstance(cmd, ClickTextCommand)
+    assert cmd.label == "Sign in"
+
+
+def test_click_text_with_punctuation():
+    cmd = parse_command("CLICK_TEXT [Yes, continue]")
+    assert isinstance(cmd, ClickTextCommand)
+    assert cmd.label == "Yes, continue"
+
+
+def test_click_text_is_not_eaten_by_click_regex():
+    cmd = parse_command("CLICK_TEXT [Submit]")
+    assert isinstance(cmd, ClickTextCommand)
+    assert not isinstance(cmd, ClickCommand)
+
+
+def test_click_text_empty_label_falls_through():
+    # An empty label isn't useful — parser should reject and return None.
+    assert parse_command("CLICK_TEXT []") is None

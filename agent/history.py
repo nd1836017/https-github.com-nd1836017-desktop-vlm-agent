@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from .parser import (
     ClickCommand,
+    ClickTextCommand,
     Command,
     DoubleClickCommand,
     DragCommand,
@@ -58,6 +59,8 @@ def render_command(cmd: Command, *, redact_type: bool = False) -> str:
         return f"MOVE_TO [{cmd.x},{cmd.y}]"
     if isinstance(cmd, WaitCommand):
         return f"WAIT [{cmd.seconds}]"
+    if isinstance(cmd, ClickTextCommand):
+        return f"CLICK_TEXT [{cmd.label}]"
     return str(cmd)
 
 

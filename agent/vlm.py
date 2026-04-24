@@ -16,8 +16,101 @@ from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
 from PIL import Image
+from pydantic import BaseModel, Field
+
+from .parser import (
+    ClickCommand,
+    ClickTextCommand,
+    Command,
+    DoubleClickCommand,
+    DragCommand,
+    MoveToCommand,
+    PressCommand,
+    RightClickCommand,
+    ScrollCommand,
+    TypeCommand,
+    WaitCommand,
+)
 
 log = logging.getLogger(__name__)
+
+
+class PlanResponseModel(BaseModel):
+    """Structured schema for the planner's JSON output.
+
+    One of the sub-command fields is populated for each response. Fields not
+    relevant to the chosen command may be omitted or left null; the converter
+    below ignores them.
+    """
+
+    command: str = Field(
+        description=(
+            "The action kind. Must be one of: CLICK, DOUBLE_CLICK, "
+            "RIGHT_CLICK, MOVE_TO, PRESS, TYPE, SCROLL, DRAG, WAIT, CLICK_TEXT."
+        )
+    )
+    x: int | None = Field(default=None, description="Normalized X in [0,1000].")
+    y: int | None = Field(default=None, description="Normalized Y in [0,1000].")
+    key: str | None = Field(default=None, description="Key name for PRESS.")
+    text: str | None = Field(default=None, description="Text to TYPE.")
+    direction: str | None = Field(default=None, description="up or down, for SCROLL.")
+    amount: int | None = Field(default=None, description="Scroll distance (positive int).")
+    x1: int | None = Field(default=None, description="DRAG start X.")
+    y1: int | None = Field(default=None, description="DRAG start Y.")
+    x2: int | None = Field(default=None, description="DRAG end X.")
+    y2: int | None = Field(default=None, description="DRAG end Y.")
+    seconds: float | None = Field(default=None, description="Seconds for WAIT.")
+    label: str | None = Field(default=None, description="Text label for CLICK_TEXT.")
+
+
+def plan_response_to_command(resp: PlanResponseModel) -> Command | None:
+    """Convert a parsed JSON schema response into a Command instance."""
+    kind = (resp.command or "").upper().strip()
+    try:
+        if kind == "CLICK" and resp.x is not None and resp.y is not None:
+            return ClickCommand(x=int(resp.x), y=int(resp.y))
+        if kind == "DOUBLE_CLICK" and resp.x is not None and resp.y is not None:
+            return DoubleClickCommand(x=int(resp.x), y=int(resp.y))
+        if kind == "RIGHT_CLICK" and resp.x is not None and resp.y is not None:
+            return RightClickCommand(x=int(resp.x), y=int(resp.y))
+        if kind == "MOVE_TO" and resp.x is not None and resp.y is not None:
+            return MoveToCommand(x=int(resp.x), y=int(resp.y))
+        if kind == "PRESS" and resp.key:
+            return PressCommand(key=resp.key.strip())
+        if kind == "TYPE" and resp.text is not None:
+            return TypeCommand(text=resp.text)
+        if (
+            kind == "SCROLL"
+            and resp.direction
+            and resp.amount is not None
+        ):
+            direction = resp.direction.lower().strip()
+            if direction not in {"up", "down"}:
+                return None
+            return ScrollCommand(direction=direction, amount=abs(int(resp.amount)))
+        if (
+            kind == "DRAG"
+            and resp.x1 is not None
+            and resp.y1 is not None
+            and resp.x2 is not None
+            and resp.y2 is not None
+        ):
+            return DragCommand(
+                x1=int(resp.x1), y1=int(resp.y1), x2=int(resp.x2), y2=int(resp.y2)
+            )
+        if kind == "WAIT" and resp.seconds is not None:
+            return WaitCommand(seconds=float(resp.seconds))
+        if kind == "CLICK_TEXT" and resp.label:
+            return ClickTextCommand(label=resp.label.strip())
+    except (TypeError, ValueError) as exc:
+        log.warning("plan_response_to_command: bad payload: %s", exc)
+        return None
+    return None
+
+
+class VerifyResponseModel(BaseModel):
+    verdict: str = Field(description="PASS or FAIL.")
+    reason: str = Field(default="", description="Short human-readable justification.")
 
 
 # Status codes that are considered transient: the model is up but busy or
@@ -83,6 +176,7 @@ RESPOND WITH EXACTLY ONE COMMAND on its own line, chosen from:
     SCROLL [DIR, AMOUNT]     — scroll the window. DIR is up or down; AMOUNT is a positive integer number of wheel clicks. Example: SCROLL [down, 5].
     DRAG [X1,Y1,X2,Y2]       — press at (X1,Y1), drag to (X2,Y2), release. Use for sliders, drag-to-select, drag-and-drop.
     WAIT [SECONDS]           — sleep SECONDS (float, capped at 60) before the next step. Use when waiting for a page to load or an animation to finish.
+    CLICK_TEXT [LABEL]       — click the on-screen text whose label best matches LABEL. Use ONLY for text-labeled UI (buttons, links) where you can read the exact label. Do NOT use for icon-only targets.
 
 Rules:
 - Output ONLY the command, wrapped in square brackets. No prose, no markdown, no explanation.
@@ -154,17 +248,29 @@ class GeminiClient:
         retry_max_attempts: int = 6,
         retry_base_delay_seconds: float = 5.0,
         retry_max_delay_seconds: float = 300.0,
+        enable_json_output: bool = True,
     ) -> None:
         self._client = genai.Client(api_key=api_key)
         self._model_name = model_name
         self._retry_max_attempts = retry_max_attempts
         self._retry_base_delay_seconds = retry_base_delay_seconds
         self._retry_max_delay_seconds = retry_max_delay_seconds
+        self._enable_json_output = enable_json_output
         self._action_config = types.GenerateContentConfig(
             system_instruction=ACTION_SYSTEM_PROMPT,
         )
+        self._action_config_json = types.GenerateContentConfig(
+            system_instruction=ACTION_SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            response_schema=PlanResponseModel,
+        )
         self._verify_config = types.GenerateContentConfig(
             system_instruction=VERIFY_SYSTEM_PROMPT,
+        )
+        self._verify_config_json = types.GenerateContentConfig(
+            system_instruction=VERIFY_SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            response_schema=VerifyResponseModel,
         )
         self._refine_config = types.GenerateContentConfig(
             system_instruction=REFINE_SYSTEM_PROMPT,
@@ -172,7 +278,11 @@ class GeminiClient:
         self._disambig_config = types.GenerateContentConfig(
             system_instruction=DISAMBIG_SYSTEM_PROMPT,
         )
-        log.info("Initialized Gemini client with model=%s", model_name)
+        log.info(
+            "Initialized Gemini client with model=%s (json_output=%s)",
+            model_name,
+            enable_json_output,
+        )
 
     def _generate(
         self,
@@ -199,8 +309,14 @@ class GeminiClient:
         screenshot: Image.Image,
         history_summary: str = "",
         previous_failure: str = "",
-    ) -> str:
+    ) -> tuple[str, Command | None]:
         """Ask the VLM what action to take for the given step.
+
+        Returns `(raw_text, command_or_none)`. When JSON-output mode is
+        enabled, `command_or_none` is set to the deterministically-parsed
+        Command and the caller can skip regex parsing. On JSON parse failure
+        or when JSON is disabled, it is None and the caller should fall back
+        to `parse_command(raw_text)`.
 
         `history_summary` is an optional compact text block of recent
         (step, action, verdict) records. `previous_failure` is set when we
@@ -219,30 +335,89 @@ class GeminiClient:
                 "Pick a DIFFERENT action this time."
             )
         parts.append(f"Current step: {step}")
+
+        if self._enable_json_output:
+            parts.append(
+                "Respond with a single JSON object following the schema."
+            )
+            prompt = "\n\n".join(parts)
+            response = self._generate(
+                "plan_action_json",
+                [prompt, screenshot],
+                self._action_config_json,
+            )
+            text = (response.text or "").strip()
+            log.debug("plan_action response (json): %r", text)
+
+            parsed = getattr(response, "parsed", None)
+            if isinstance(parsed, PlanResponseModel):
+                cmd = plan_response_to_command(parsed)
+                if cmd is not None:
+                    return text, cmd
+                log.warning(
+                    "plan_action: JSON schema returned but could not be mapped "
+                    "to a Command; falling back to regex parse: %r",
+                    parsed,
+                )
+            else:
+                log.warning(
+                    "plan_action: no structured parse available; falling back "
+                    "to regex parse on raw text."
+                )
+            return text, None
+
         parts.append("Respond with ONE command only.")
         prompt = "\n\n".join(parts)
-
         response = self._generate("plan_action", [prompt, screenshot], self._action_config)
         text = (response.text or "").strip()
         log.debug("plan_action response: %r", text)
-        return text
+        return text, None
 
     def verify(self, goal: str, screenshot: Image.Image) -> VerificationResult:
         """Ask the VLM to verify that the post-action state matches the goal."""
         prompt = (
             f"Goal of the last action: {goal}\n\n"
             "Did the screen state become consistent with the goal? "
-            "Respond with a single VERDICT line."
+            "Respond with a PASS or FAIL verdict."
         )
+
+        if self._enable_json_output:
+            response = self._generate(
+                "verify_json", [prompt, screenshot], self._verify_config_json
+            )
+            text = (response.text or "").strip()
+            log.debug("verify response (json): %r", text)
+            parsed = getattr(response, "parsed", None)
+            if isinstance(parsed, VerifyResponseModel):
+                verdict = (parsed.verdict or "").upper().strip()
+                reason = (parsed.reason or "").strip() or verdict
+                if verdict == "PASS":
+                    return VerificationResult(passed=True, reason=reason)
+                if verdict == "FAIL":
+                    return VerificationResult(passed=False, reason=reason)
+                log.warning(
+                    "verify: JSON parsed but verdict was %r; treating as FAIL.",
+                    parsed.verdict,
+                )
+                return VerificationResult(
+                    passed=False,
+                    reason=f"Unparseable verdict: {parsed.verdict!r}",
+                )
+            # Fall through to text parsing.
+            return self._parse_verify_text(text)
+
         response = self._generate("verify", [prompt, screenshot], self._verify_config)
         text = (response.text or "").strip()
         log.debug("verify response: %r", text)
+        return self._parse_verify_text(text)
+
+    @staticmethod
+    def _parse_verify_text(text: str) -> VerificationResult:
         upper = text.upper()
-        if "VERDICT: PASS" in upper:
+        if "VERDICT: PASS" in upper or upper.strip().startswith("PASS"):
             return VerificationResult(passed=True, reason=text)
-        if "VERDICT: FAIL" in upper:
+        if "VERDICT: FAIL" in upper or upper.strip().startswith("FAIL"):
             return VerificationResult(passed=False, reason=text)
-        # Ambiguous — treat as failure so we halt safely.
         return VerificationResult(
             passed=False,
             reason=f"Unparseable verification response: {text!r}",

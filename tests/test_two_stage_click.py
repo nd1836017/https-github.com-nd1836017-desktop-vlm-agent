@@ -140,7 +140,10 @@ class TwoStageFakeClient:
         self, step, screenshot, history_summary="", previous_failure=""
     ):
         self.plan_calls.append({"step": step})
-        return self._plan_outputs.pop(0)
+        out = self._plan_outputs.pop(0)
+        if isinstance(out, tuple):
+            return out
+        return out, None
 
     def verify(self, goal, screenshot):
         self.verify_calls += 1

@@ -30,6 +30,8 @@ class Config:
     gemini_retry_base_delay_seconds: float
     gemini_retry_max_delay_seconds: float
     log_redact_type: bool
+    enable_json_output: bool
+    max_total_replans: int
     log_level: str
 
     @classmethod
@@ -68,6 +70,8 @@ class Config:
                 os.getenv("GEMINI_RETRY_MAX_DELAY_SECONDS", "300.0")
             ),
             log_redact_type=_env_bool("LOG_REDACT_TYPE", default=True),
+            enable_json_output=_env_bool("ENABLE_JSON_OUTPUT", default=True),
+            max_total_replans=int(os.getenv("MAX_TOTAL_REPLANS", "10")),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         )
 

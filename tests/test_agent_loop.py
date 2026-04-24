@@ -45,7 +45,12 @@ class FakeClient:
                 "previous_failure": previous_failure,
             }
         )
-        return self._plan_outputs.pop(0)
+        out = self._plan_outputs.pop(0)
+        # FakeClient stays text-only — it always returns (raw, None) so the
+        # agent falls back to the regex parser just like the legacy path.
+        if isinstance(out, tuple):
+            return out
+        return out, None
 
     def verify(self, goal, screenshot):
         self.verify_calls += 1
@@ -99,6 +104,8 @@ def _cfg(tmp_path, tasks_text: str, **overrides) -> Config:
         gemini_retry_base_delay_seconds=0.0,
         gemini_retry_max_delay_seconds=0.0,
         log_redact_type=True,
+        enable_json_output=False,
+        max_total_replans=0,
         log_level="INFO",
     )
     defaults.update(overrides)

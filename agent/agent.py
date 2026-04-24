@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import logging
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Config
 from .executor import execute, execute_click_pixels
 from .history import History, render_command
-from .parser import ClickCommand, parse_command
+from .ocr import find_text_center
+from .parser import ClickCommand, ClickTextCommand, parse_command
 from .screen import (
     ScreenGeometry,
     annotate_candidates,
@@ -27,6 +29,30 @@ from .screen import (
 )
 from .state import AgentState, load_state, save_state
 from .vlm import GeminiClient, VerificationResult
+
+
+@dataclass
+class ReplanCounter:
+    """Tracks total replans across the whole run (not just per-step).
+
+    When ``total_max > 0`` and ``total_used >= total_max`` the agent halts
+    with a clear message. A counter value of 0 means "unlimited" — matching
+    the PR #2 behaviour for backwards compat.
+    """
+
+    total_max: int = 0
+    total_used: int = 0
+    budget_exhausted: bool = field(default=False)
+
+    def can_replan(self) -> bool:
+        if self.total_max <= 0:
+            return True
+        return self.total_used < self.total_max
+
+    def record_replan(self) -> None:
+        self.total_used += 1
+        if self.total_max > 0 and self.total_used >= self.total_max:
+            self.budget_exhausted = True
 
 log = logging.getLogger(__name__)
 
@@ -113,6 +139,52 @@ def _execute_click_two_stage(
     return True, action_text
 
 
+def _execute_click_text(
+    cmd: ClickTextCommand,
+    screenshot,  # PIL.Image.Image
+    geometry: ScreenGeometry,
+    animation_buffer: float,
+    click_min_delay_seconds: float = 0.0,
+    click_max_delay_seconds: float = 0.0,
+) -> tuple[bool, str]:
+    """Locate ``cmd.label`` via OCR and click its center.
+
+    Returns `(ok, action_text)`. On a miss we return `ok=False` with a
+    reason embedded in `action_text` so the agent loop treats the step as
+    a verify FAIL (replan path), rather than blindly clicking the wrong
+    spot. Uses `agent.ocr.find_text_center` which is tesseract-backed.
+    """
+    match = find_text_center(screenshot, cmd.label)
+    if match is None:
+        reason = f"CLICK_TEXT [{cmd.label}] (no OCR match)"
+        log.warning("%s", reason)
+        return False, reason
+
+    px, py = match.center()
+    # Geometry's size may differ from the screenshot size (e.g. HiDPI). For
+    # now we assume screenshot == screen, which is how capture_screenshot()
+    # behaves on this codebase. Map safely if that invariant changes.
+    w, h = screenshot.size
+    if (w, h) != (geometry.width, geometry.height):
+        # Rescale pixel coordinates to the physical screen.
+        px = int(round(px * geometry.width / w))
+        py = int(round(py * geometry.height / h))
+
+    action_text = (
+        f"CLICK_TEXT [{cmd.label}] -> pixels=({px},{py}) "
+        f"(match={match.text!r}, score={match.score:.2f}, conf={match.confidence:.0f})"
+    )
+    log.info("Action: %s", action_text)
+    execute_click_pixels(
+        px,
+        py,
+        animation_buffer_seconds=animation_buffer,
+        click_min_delay_seconds=click_min_delay_seconds,
+        click_max_delay_seconds=click_max_delay_seconds,
+    )
+    return True, action_text
+
+
 def _attempt_step(
     step: str,
     vlm: GeminiClient,
@@ -141,13 +213,15 @@ def _attempt_step(
     while attempts <= max_parse_retries:
         attempts += 1
         screenshot = capture_screenshot()
-        raw = vlm.plan_action(
+        raw, cmd = vlm.plan_action(
             step,
             screenshot,
             history_summary=history_summary,
             previous_failure=previous_failure,
         )
-        cmd = parse_command(raw)
+        if cmd is None:
+            # JSON-mode failed or disabled — fall back to regex parse.
+            cmd = parse_command(raw)
         if cmd is None:
             last_parse_error = f"Could not parse VLM response: {raw!r}"
             log.warning(
@@ -157,7 +231,24 @@ def _attempt_step(
             )
             continue
 
-        if isinstance(cmd, ClickCommand) and enable_two_stage_click:
+        if isinstance(cmd, ClickTextCommand):
+            ok, action_text = _execute_click_text(
+                cmd=cmd,
+                screenshot=screenshot,
+                geometry=geometry,
+                animation_buffer=animation_buffer,
+                click_min_delay_seconds=click_min_delay_seconds,
+                click_max_delay_seconds=click_max_delay_seconds,
+            )
+            if not ok:
+                return (
+                    VerificationResult(
+                        passed=False,
+                        reason=f"CLICK_TEXT failed: {action_text}",
+                    ),
+                    action_text,
+                )
+        elif isinstance(cmd, ClickCommand) and enable_two_stage_click:
             ok, action_text = _execute_click_two_stage(
                 step=step,
                 cmd=cmd,
@@ -224,6 +315,7 @@ def run_step(
     type_min_interval_seconds: float = 0.02,
     type_max_interval_seconds: float = 0.02,
     log_redact_type: bool = True,
+    replan_counter: ReplanCounter | None = None,
 ) -> VerificationResult:
     """Run one step with up to `max_replans` replans on verify FAIL.
 
@@ -241,6 +333,27 @@ def run_step(
     last_action_text = "<no-action>"
 
     for attempt_idx in range(1, total_attempts + 1):
+        # Global replan guard. The first attempt is NOT a replan, so only
+        # consult / consume the budget on attempts 2+.
+        if attempt_idx > 1 and replan_counter is not None:
+            if not replan_counter.can_replan():
+                log.error(
+                    "Global replan budget exhausted (%d/%d used); halting.",
+                    replan_counter.total_used,
+                    replan_counter.total_max,
+                )
+                halted = VerificationResult(
+                    passed=False,
+                    reason=(
+                        f"Global replan budget exhausted "
+                        f"({replan_counter.total_used}/{replan_counter.total_max}). "
+                        f"Last failure: {last_verdict.reason if last_verdict else 'n/a'}"
+                    ),
+                )
+                history.record(step, last_action_text, passed=False, reason=halted.reason)
+                return halted
+            replan_counter.record_replan()
+
         log.info(
             "Step attempt %d/%d (replan budget: %d remaining)",
             attempt_idx,
@@ -328,8 +441,10 @@ def run(config: Config, resume: bool = False) -> int:
         retry_max_attempts=config.gemini_retry_max_attempts,
         retry_base_delay_seconds=config.gemini_retry_base_delay_seconds,
         retry_max_delay_seconds=config.gemini_retry_max_delay_seconds,
+        enable_json_output=config.enable_json_output,
     )
     history = History(window=config.history_window)
+    replan_counter = ReplanCounter(total_max=config.max_total_replans)
 
     log.info(
         "Loaded %d step(s) from %s (starting at step %d)",
@@ -360,6 +475,7 @@ def run(config: Config, resume: bool = False) -> int:
             type_min_interval_seconds=config.type_min_interval_seconds,
             type_max_interval_seconds=config.type_max_interval_seconds,
             log_redact_type=config.log_redact_type,
+            replan_counter=replan_counter,
         )
 
         if not result.passed:

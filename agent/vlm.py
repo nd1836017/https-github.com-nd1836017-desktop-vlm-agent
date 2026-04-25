@@ -44,6 +44,12 @@ from .screen import image_signature, image_to_jpeg_bytes
 
 log = logging.getLogger(__name__)
 
+# "NONE" sentinel matcher used by extract_value. Anchored at the start
+# and followed by a word boundary so legitimate values like "NONEXISTENT"
+# don't get swallowed, but typical sentinel forms ("NONE", "NONE.",
+# "NONE: not found", "NONE\nreason: ...") all match.
+_NONE_SENTINEL_RE = re.compile(r"^NONE\b")
+
 
 class PlanResponseModel(BaseModel):
     """Structured schema for the planner's JSON output.
@@ -1002,7 +1008,15 @@ class GeminiClient:
         if not text:
             return ExtractionResult(found=False, value="", raw="")
         upper = text.strip().upper()
-        if upper == "NONE" or upper.startswith("NONE\n"):
+        # Match NONE as a sentinel: bare ``NONE``, ``NONE.``, ``NONE:``,
+        # ``NONE — value not found``, ``NONE\nreason: …``, etc. The
+        # word-boundary anchor keeps us from misparsing legitimate
+        # values that happen to start with the letters NONE
+        # (``NONEXISTENT``, ``NONESUCH``). The previous check only
+        # caught literal ``NONE`` and ``NONE\n…``, so a slightly verbose
+        # model emitting ``NONE.`` or ``NONE: value not found`` was
+        # treated as a successful extraction of the string "NONE.".
+        if _NONE_SENTINEL_RE.match(upper):
             return ExtractionResult(found=False, value="", raw=text)
         # Strip the optional ``VALUE: `` prefix the system prompt asks for.
         m = re.match(r"\s*VALUE\s*:\s*(.*)", text, re.IGNORECASE | re.DOTALL)
@@ -1014,6 +1028,6 @@ class GeminiClient:
                 (line.strip() for line in text.splitlines() if line.strip()),
                 "",
             )
-        if not value or value.upper() == "NONE":
+        if not value or _NONE_SENTINEL_RE.match(value.upper()):
             return ExtractionResult(found=False, value="", raw=text)
         return ExtractionResult(found=True, value=value, raw=text)

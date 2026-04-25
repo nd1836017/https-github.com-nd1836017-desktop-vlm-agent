@@ -581,11 +581,22 @@ def _attempt_step(
             artifact_writer.save_verdict(step_idx, verdict.passed, verdict.reason)
         return verdict, action_text
 
+    parse_fail_reason = (
+        f"Parse failure after {max_parse_retries + 1} attempts: {last_parse_error}"
+    )
+    if artifact_writer is not None:
+        # Every other return path from _attempt_step writes both
+        # save_plan() and save_verdict(), so a postmortem reader can
+        # rely on the artifact bundle being symmetric. The parse-fail
+        # path used to skip both, leaving a `before` screenshot with
+        # no plan/verdict — confusing when triaging a stuck run.
+        # Synthesize placeholders that match the verdict we return.
+        artifact_writer.save_plan(
+            step_idx, "<parse-failed>", "<parse-failed>"
+        )
+        artifact_writer.save_verdict(step_idx, False, parse_fail_reason)
     return (
-        VerificationResult(
-            passed=False,
-            reason=f"Parse failure after {max_parse_retries + 1} attempts: {last_parse_error}",
-        ),
+        VerificationResult(passed=False, reason=parse_fail_reason),
         "<parse-failed>",
     )
 
@@ -703,16 +714,19 @@ def run_step(
             return halted
 
         # Log the attempt number plus an unambiguous replan-budget label.
-        # `total_attempts = max_replans + 1` (the initial attempt is not a
-        # replan). On attempt 1 we have all `max_replans` replans available;
-        # on attempt 2 we're using replan #1; etc.
-        max_replans = total_attempts - 1
+        # ``total_attempts = max_replans + 1`` (the initial attempt is not
+        # a replan). On attempt 1 we have all replans available; on
+        # attempt 2 we're using replan #1; etc. We use a local
+        # ``replan_budget`` for log labels (not ``max_replans``) so the
+        # function parameter name doesn't get shadowed — code-smell only,
+        # caught by Devin Review.
+        replan_budget = total_attempts - 1
         if not is_replan_attempt:
             log.info(
                 "Step attempt %d/%d (initial — %d replan(s) available if this fails)",
                 attempt_idx,
                 total_attempts,
-                max_replans,
+                replan_budget,
             )
         else:
             replan_number = attempt_idx - 1
@@ -721,8 +735,8 @@ def run_step(
                 attempt_idx,
                 total_attempts,
                 replan_number,
-                max_replans,
-                max_replans - replan_number,
+                replan_budget,
+                replan_budget - replan_number,
             )
 
         verdict, action_text = _attempt_step(

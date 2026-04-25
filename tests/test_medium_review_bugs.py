@@ -144,9 +144,7 @@ def test_bug8_csv_step_count_reports_expanded_total():
     assert feats.csv_row_count == 10
     assert feats.csv_step_count == 30
     summary = format_features_summary(feats, total_steps=30)
-    # Real numbers in the user-facing message.
-    assert "10 rows" in summary
-    assert "3 inner" in summary
+    # Honest summary: expanded total + the CSV file.
     assert "30 expanded" in summary
     assert "from data.csv" in summary
 
@@ -156,6 +154,43 @@ def test_bug8_csv_step_count_zero_when_no_loop():
     assert feats.csv_row_count == 0
     assert feats.csv_step_count == 0
     assert not feats.uses_csv_loop
+
+
+def test_bug8_summary_does_not_print_misleading_equation_for_multi_csv():
+    """Two blocks with different CSVs / inner counts must not produce a
+    bogus 'rows × inner = expanded' equation.
+
+    Block 1: 5 rows × 2 inner = 10 expanded (data1.csv)
+    Block 2: 3 rows × 1 inner = 3 expanded (data2.csv)
+    Aggregated: csv_row_count=5 (max), csv_step_count=13 (sum).
+    The naive equation 5 × 2 = 10 would render as "5 rows × 2 inner steps
+    = 13 expanded" which is arithmetically wrong. We avoid that by
+    showing only the expanded total + file list.
+    """
+    steps = []
+    # Block 1: 5 rows, each with 2 inner steps, against data1.csv.
+    for row in range(1, 6):
+        for inner in ("a", "b"):
+            steps.append(
+                _step(f"step {inner} row {row}", row_index=row, csv_name="data1.csv")
+            )
+    # Block 2: 3 rows, each with 1 inner step, against data2.csv.
+    for row in range(1, 4):
+        steps.append(
+            _step(f"step c row {row}", row_index=row, csv_name="data2.csv")
+        )
+
+    feats = inspect_features(steps)
+    assert feats.csv_step_count == 13
+    summary = format_features_summary(feats, total_steps=13)
+
+    # The PR's bug: the equation "5 × 2 = 13" must NOT appear.
+    assert "× 2 inner" not in summary
+    assert "= 13" not in summary
+    # The honest replacement should be present.
+    assert "13 expanded" in summary
+    assert "data1.csv" in summary
+    assert "data2.csv" in summary
 
 
 # ---------------------------------------------------------------------------

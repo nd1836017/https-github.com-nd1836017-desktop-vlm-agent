@@ -713,20 +713,24 @@ def format_features_summary(features: RunFeatures, *, total_steps: int) -> str:
     """Return a one-paragraph human-readable rundown of detected features."""
     lines = [f"Tasks loaded: {total_steps} step(s)"]
     if features.uses_csv_loop:
-        # Show real numbers: rows × inner = expanded total. Inner-step
-        # count is implicit (csv_step_count // csv_row_count) but we
-        # spell it out so the user can sanity-check at a glance.
-        rows = features.csv_row_count
+        # Show the real expanded step count. We deliberately do NOT
+        # display "rows × inner = expanded" here: when a tasks file has
+        # more than one FOR_EACH_ROW block (or two blocks pointing at
+        # different CSVs with different inner-step counts), the equation
+        # doesn't hold — ``csv_row_count`` is ``max(row_index)`` across
+        # all blocks, while ``csv_step_count`` is the total expanded
+        # count summed across blocks, so dividing the second by the
+        # first produces a wrong "inner" number and a misleading
+        # equation. Listing the expanded total + CSV files is always
+        # correct and is what the user actually wants to know.
         expanded = features.csv_step_count
-        inner = (expanded // rows) if rows else 0
         from_part = (
             f" from {', '.join(features.csv_files)}"
             if features.csv_files
             else ""
         )
         lines.append(
-            f"  - FOR_EACH_ROW ({rows} rows × {inner} inner steps = "
-            f"{expanded} expanded{from_part})"
+            f"  - FOR_EACH_ROW ({expanded} expanded step(s){from_part})"
         )
     if features.uses_downloads:
         lines.append(f"  - DOWNLOAD × {features.download_count}")

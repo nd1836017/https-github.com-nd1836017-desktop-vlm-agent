@@ -232,6 +232,16 @@ def plan_response_to_command(resp: PlanResponseModel) -> Command | None:
         ):
             direction = resp.direction.lower().strip()
             if direction not in {"up", "down"}:
+                # Surface the bad VLM response loudly. Returning None
+                # silently dropped malformed scrolls and made debugging
+                # impossible — the planner just looked like it sent
+                # nothing. The text-mode parser already constrains
+                # direction via _SCROLL_RE so this path is JSON-only.
+                log.warning(
+                    "SCROLL: invalid direction %r (expected 'up' or 'down') "
+                    "— dropping plan",
+                    resp.direction,
+                )
                 return None
             return ScrollCommand(direction=direction, amount=abs(int(resp.amount)))
         if (

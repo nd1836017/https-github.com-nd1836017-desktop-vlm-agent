@@ -140,6 +140,15 @@ def execute_click_pixels(
     directly from a cropped region and we want to bypass the normalized
     0-1000 round-trip (which would lose sub-unit precision). A human-like
     pre-click delay is applied first when configured.
+
+    The post-click ``animation_buffer_seconds`` sleep is **intentional**
+    and matches the regular ``CLICK`` branch in :func:`execute` — every
+    real click can trigger a state change (modal opens, page navigates,
+    autocomplete appears) so the next screenshot/verify call has to wait
+    for the UI to settle. A two-stage CLICK does ONE final click, not
+    two, so this does not double up latency. Pass
+    ``animation_buffer_seconds=0.0`` if a caller has separate evidence
+    the click cannot animate.
     """
     pyautogui = _pyautogui()
     _human_pre_click_delay(click_min_delay_seconds, click_max_delay_seconds)
@@ -285,7 +294,14 @@ def execute(
             )
             if interval > 0:
                 time.sleep(interval)
-        time.sleep(0.25)
+        # Post-TYPE settle. For short strings 0.25s is plenty, but for
+        # large pastes (forms, descriptions, code blocks) the page is
+        # often still running input/change handlers — autocompletes,
+        # validation, expensive React re-renders. Scale linearly with
+        # length and cap at 2.0s so we never burn excessive time on the
+        # buffer alone for a one-off long type.
+        post_type_buffer = min(2.0, max(0.25, len(cmd.text) * 0.005))
+        time.sleep(post_type_buffer)
         return
 
     raise TypeError(f"Unknown command type: {type(cmd).__name__}")

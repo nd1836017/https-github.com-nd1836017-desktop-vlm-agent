@@ -81,17 +81,45 @@ def render_command(cmd: Command, *, redact_type: bool = False) -> str:
 
 
 class History:
-    """Bounded FIFO of recent step records."""
+    """Bounded FIFO of recent step records.
+
+    ``window`` controls how many records are retained for prompt injection:
+
+    - ``window > 0`` (default 5): rolling window; the deque keeps the last
+      ``window`` records and drops older ones.
+    - ``window == 0`` **disables short-term memory entirely** — ``record()``
+      is a no-op, ``__iter__`` yields nothing, ``summary()`` returns an
+      empty string. This is the documented opt-out from
+      ``HISTORY_WINDOW=0`` in ``.env``; it is *not* an alias for
+      "unlimited".
+    - ``window < 0`` raises ``ValueError`` — there is no "unlimited" mode.
+
+    The intentional silent no-op for ``window == 0`` is the difference
+    callers should know about. If you want a rolling memory, use any
+    positive integer; if you want to turn memory off, use 0.
+    """
 
     def __init__(self, window: int = 5) -> None:
         if window < 0:
-            raise ValueError("history window must be non-negative")
+            raise ValueError(
+                "history window must be non-negative; use 0 to disable"
+            )
         self._window = window
-        self._records: deque[StepRecord] = deque(maxlen=window) if window > 0 else deque(maxlen=0)
+        # When disabled, keep an empty deque rather than ``None`` so all
+        # iteration / len / summary calls remain branch-free at the call
+        # site. ``record()`` returns early so nothing is ever appended.
+        self._records: deque[StepRecord] = deque(
+            maxlen=window if window > 0 else 0
+        )
 
     @property
     def window(self) -> int:
         return self._window
+
+    @property
+    def disabled(self) -> bool:
+        """True when ``window == 0`` and short-term memory is off."""
+        return self._window == 0
 
     def record(self, step: str, action_text: str, passed: bool, reason: str) -> None:
         if self._window == 0:
@@ -106,17 +134,25 @@ class History:
         )
 
     def __iter__(self) -> Iterator[StepRecord]:
+        # Short-circuit when disabled — no records can ever exist, but
+        # being explicit makes the no-op behavior obvious to readers and
+        # avoids relying on the empty-deque coincidence.
+        if self._window == 0:
+            return iter(())
         return iter(self._records)
 
     def __len__(self) -> int:
+        if self._window == 0:
+            return 0
         return len(self._records)
 
     def summary(self) -> str:
         """Render recent records as a compact text block for prompt injection.
 
-        Returns an empty string when there is no history to report.
+        Returns an empty string when there is no history to report (which
+        includes the ``window == 0`` "disabled" mode — see class docstring).
         """
-        if not self._records:
+        if self._window == 0 or not self._records:
             return ""
         lines: list[str] = []
         for idx, rec in enumerate(self._records, start=1):

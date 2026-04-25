@@ -95,11 +95,18 @@ def save_state(path: Path, state: AgentState) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
-    except Exception:
+    except Exception as exc:
         # Best-effort cleanup of the temp file on failure.
         with contextlib.suppress(OSError):
             os.unlink(tmp)
-        raise
+        # Re-raise with context so log lines and tracebacks tell the
+        # operator which checkpoint write failed and via which temp file.
+        # The bare ``raise`` we used to do here lost the file path —
+        # callers just saw "OSError: [Errno 28] No space left on device"
+        # with no hint that it was the checkpoint, not their data.
+        raise OSError(
+            f"Failed to write checkpoint to {path} (via temp {tmp}): {exc}"
+        ) from exc
 
 
 def reset_state(path: Path) -> None:

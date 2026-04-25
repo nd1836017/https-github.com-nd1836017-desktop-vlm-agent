@@ -234,8 +234,13 @@ _PAUSE_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 # DOWNLOAD accepts [URL] (filename auto-derived) or [URL, FILENAME].
+# The URL/FILENAME delimiter is comma + AT LEAST ONE WHITESPACE so that URLs
+# containing bare commas (e.g. ``?ids=1,2,3`` query params) aren't silently
+# truncated. ``DOWNLOAD [https://x/y?a=1,2,3]`` keeps the whole URL intact;
+# ``DOWNLOAD [https://x/y, out.pdf]`` splits at the comma+space. Filenames
+# may not contain ``,`` or ``]`` themselves.
 _DOWNLOAD_RE = re.compile(
-    r"DOWNLOAD\s*\[\s*([^,\]\n]+?)\s*(?:,\s*(.+?)\s*)?\]",
+    r"DOWNLOAD\s*\[\s*(.+?)(?:,\s+([^\],]+?))?\s*\]",
     re.IGNORECASE,
 )
 _ATTACH_FILE_RE = re.compile(

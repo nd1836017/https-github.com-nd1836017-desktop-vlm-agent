@@ -309,9 +309,9 @@ The VLM is instructed to respond with exactly one of the following:
 | `DRAG [X1,Y1,X2,Y2]` | `DRAG [100,200,400,500]` | Click-and-drag from (X1,Y1) to (X2,Y2) on the 0–1000 grid. |
 | `WAIT [SECONDS]` | `WAIT [3]` | Pause execution for N seconds (no VLM call). |
 | `PAUSE [reason]` | `PAUSE [2FA prompt needs manual approval]` | Emitted by the VLM when it sees a 2FA / CAPTCHA / "Verify it's you" screen. Agent halts cleanly with zero side-effects and waits for <kbd>Enter</kbd>. |
-| `DOWNLOAD [url, filename]` | `DOWNLOAD [https://example.com/inv.pdf, inv.pdf]` | Fetches a URL via HTTPS and stores it in the run's file workspace. `filename` is optional; when missing it's derived from the URL. Honors the run's file mode (temp/save/feed). |
-| `ATTACH_FILE [filename]` | `ATTACH_FILE [inv.pdf]` | Types a path into the focused OS file-picker (`Ctrl+L` → path → Enter). The agent must already have clicked the dialog's Browse button. `filename` is resolved against the workspace first, then the disk. |
-| `CAPTURE_FOR_AI [filename]` | `CAPTURE_FOR_AI` | Buffers an image for the next plan call. Without an arg, captures the current screen; with one, reads it from the workspace or disk. Useful for "look at this PDF and tell me the invoice number". |
+| `DOWNLOAD [url, filename]` | `DOWNLOAD [https://example.com/inv.pdf, inv.pdf]` | Fetches a URL via HTTPS and stores it in the run's file workspace. `filename` is optional; when missing it's derived from the URL. The URL/FILENAME delimiter is **comma followed by at least one space** (so URLs like `?ids=1,2,3` aren't truncated). Honors the run's file mode (temp/save/feed). |
+| `ATTACH_FILE [filename]` | `ATTACH_FILE [inv.pdf]` | Pastes a path into the focused OS file-picker (`Ctrl+L` → paste → Enter) via the system clipboard, so non-ASCII filenames work. The agent must already have clicked the dialog's Browse button. `filename` is resolved against the workspace first, then the disk. |
+| `CAPTURE_FOR_AI [filename]` | `CAPTURE_FOR_AI []` | Buffers an image for the next plan call. **Brackets are required** (empty `[]` = grab the current screen; otherwise reads `filename` from the workspace or disk). Useful for "look at this PDF and tell me the invoice number". |
 
 The parser is lenient — it recovers from conversational wrapping, missing brackets, or parentheses in place of brackets.
 

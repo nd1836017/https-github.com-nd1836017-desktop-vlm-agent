@@ -258,6 +258,46 @@ def test_parse_download_url_only():
     assert cmd.filename == ""
 
 
+def test_parse_download_preserves_commas_in_url():
+    """Bare commas in URLs (e.g. ``?ids=1,2,3``) must NOT be treated as the
+    URL/FILENAME delimiter. The delimiter is comma + at least one whitespace.
+
+    Regression test: previously _DOWNLOAD_RE used ``[^,\\]\\n]+?`` for the URL
+    capture group, which silently truncated any URL containing a comma.
+    """
+    from agent.parser import DownloadCommand
+
+    cmd = parse_command("DOWNLOAD [https://example.com/file?ids=1,2,3]")
+    assert isinstance(cmd, DownloadCommand)
+    assert cmd.url == "https://example.com/file?ids=1,2,3"
+    assert cmd.filename == ""
+
+
+def test_parse_download_url_with_commas_plus_filename():
+    """URL with commas + comma-space-delimited filename still splits correctly."""
+    from agent.parser import DownloadCommand
+
+    cmd = parse_command(
+        "DOWNLOAD [https://example.com/file?a=1,2&b=3, output.pdf]"
+    )
+    assert isinstance(cmd, DownloadCommand)
+    assert cmd.url == "https://example.com/file?a=1,2&b=3"
+    assert cmd.filename == "output.pdf"
+
+
+def test_parse_download_no_space_after_comma_treats_as_one_url():
+    """``DOWNLOAD [url,name]`` (no space after comma) is now treated as a
+    single URL — the delimiter requires whitespace. This avoids silently
+    misparsing URLs that legitimately contain commas without spaces.
+    """
+    from agent.parser import DownloadCommand
+
+    cmd = parse_command("DOWNLOAD [https://example.com/foo.pdf,bar.pdf]")
+    assert isinstance(cmd, DownloadCommand)
+    assert cmd.url == "https://example.com/foo.pdf,bar.pdf"
+    assert cmd.filename == ""
+
+
 def test_parse_attach_file():
     from agent.parser import AttachFileCommand
 

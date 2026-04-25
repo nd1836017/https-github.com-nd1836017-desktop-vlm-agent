@@ -22,10 +22,13 @@ from pydantic import BaseModel, Field, ValidationError
 
 from .cost import RpdGuard
 from .parser import (
+    AttachFileCommand,
+    CaptureForAiCommand,
     ClickCommand,
     ClickTextCommand,
     Command,
     DoubleClickCommand,
+    DownloadCommand,
     DragCommand,
     MoveToCommand,
     PauseCommand,
@@ -51,7 +54,7 @@ class PlanResponseModel(BaseModel):
         description=(
             "The action kind. Must be one of: CLICK, DOUBLE_CLICK, "
             "RIGHT_CLICK, MOVE_TO, PRESS, TYPE, SCROLL, DRAG, WAIT, "
-            "CLICK_TEXT, PAUSE."
+            "CLICK_TEXT, PAUSE, DOWNLOAD, ATTACH_FILE, CAPTURE_FOR_AI."
         )
     )
     x: int | None = Field(default=None, description="Normalized X in [0,1000].")
@@ -69,6 +72,19 @@ class PlanResponseModel(BaseModel):
     reason: str | None = Field(
         default=None,
         description="Human-readable reason for PAUSE (e.g. 'Verify it's you prompt').",
+    )
+    url: str | None = Field(
+        default=None,
+        description="URL to fetch for DOWNLOAD. Must be http(s).",
+    )
+    filename: str | None = Field(
+        default=None,
+        description=(
+            "Filename for DOWNLOAD / ATTACH_FILE / CAPTURE_FOR_AI. For "
+            "DOWNLOAD this is optional (derived from the URL when missing). "
+            "For ATTACH_FILE it is required. For CAPTURE_FOR_AI it is "
+            "optional (the current screen is captured when missing)."
+        ),
     )
 
 
@@ -187,6 +203,16 @@ def plan_response_to_command(resp: PlanResponseModel) -> Command | None:
             return ClickTextCommand(label=resp.label.strip())
         if kind == "PAUSE" and resp.reason:
             return PauseCommand(reason=resp.reason.strip())
+        if kind == "DOWNLOAD" and resp.url:
+            return DownloadCommand(
+                url=resp.url.strip(),
+                filename=(resp.filename or "").strip(),
+            )
+        if kind == "ATTACH_FILE" and resp.filename:
+            return AttachFileCommand(filename=resp.filename.strip())
+        if kind == "CAPTURE_FOR_AI":
+            # filename optional — empty means "grab the current screen".
+            return CaptureForAiCommand(filename=(resp.filename or "").strip())
     except (TypeError, ValueError) as exc:
         log.warning("plan_response_to_command: bad payload: %s", exc)
         return None
@@ -270,6 +296,9 @@ RESPOND WITH EXACTLY ONE COMMAND on its own line, chosen from:
     WAIT [SECONDS]           — sleep SECONDS (float, capped at 60) before the next step. Use when waiting for a page to load or an animation to finish.
     CLICK_TEXT [LABEL]       — click the on-screen text whose label best matches LABEL. Use ONLY for text-labeled UI (buttons, links) where you can read the exact label. Do NOT use for icon-only targets.
     PAUSE [REASON]           — halt and wait for a human to resolve REASON. EMIT THIS WHENEVER you see a screen that requires manual user action that the agent cannot perform: 2FA / device-approval prompts ("Verify it's you", "Check your phone", "Enter the code we sent"), CAPTCHA / "I'm not a robot" challenges, security questions, or any "browser may not be secure" warning. REASON must be a short human-readable string explaining what the user needs to do. Example: PAUSE [Approve the sign-in on your phone, then resume].
+    DOWNLOAD [URL, FILENAME] — fetch URL via HTTPS into the run's file workspace. URL must start with http:// or https://. FILENAME is optional (derived from the URL path when missing). The file is persisted according to the run's file mode (temp / save / feed). Example: DOWNLOAD [https://example.com/inv.pdf, invoice.pdf].
+    ATTACH_FILE [FILENAME]   — type a path into the focused OS file-picker dialog (Ctrl+L, type path, press Enter). The dialog must already be open (you should have CLICKed the Browse button on the previous step). FILENAME is resolved against the workspace first, then disk. Example: ATTACH_FILE [invoice.pdf].
+    CAPTURE_FOR_AI [FILENAME] — buffer an image to feed into the NEXT plan_action call as additional context. Useful when an answer requires reading text from a PDF / receipt / image you've just opened. With no FILENAME, the current screen is captured. With a FILENAME, that file is read from the workspace or disk. Example: CAPTURE_FOR_AI [] or CAPTURE_FOR_AI [invoice.pdf].
 
 Rules:
 - Output ONLY the command, wrapped in square brackets. No prose, no markdown, no explanation.

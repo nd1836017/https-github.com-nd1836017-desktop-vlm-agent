@@ -112,6 +112,8 @@ def _cfg(tmp_path, tasks_text: str, **overrides) -> Config:
         rpd_limit=0,
         rpd_warn_threshold=0.75,
         rpd_halt_threshold=0.95,
+        file_mode=None,
+        workdir=None,
         log_level="INFO",
     )
     defaults.update(overrides)

@@ -235,3 +235,57 @@ def test_click_text_is_not_eaten_by_click_regex():
 def test_click_text_empty_label_falls_through():
     # An empty label isn't useful — parser should reject and return None.
     assert parse_command("CLICK_TEXT []") is None
+
+
+# ----------------------------------------------------- file-handling primitives
+
+
+def test_parse_download_with_filename():
+    from agent.parser import DownloadCommand
+
+    cmd = parse_command("DOWNLOAD [https://example.com/foo.pdf, foo.pdf]")
+    assert isinstance(cmd, DownloadCommand)
+    assert cmd.url == "https://example.com/foo.pdf"
+    assert cmd.filename == "foo.pdf"
+
+
+def test_parse_download_url_only():
+    from agent.parser import DownloadCommand
+
+    cmd = parse_command("DOWNLOAD [https://example.com/foo.pdf]")
+    assert isinstance(cmd, DownloadCommand)
+    assert cmd.url == "https://example.com/foo.pdf"
+    assert cmd.filename == ""
+
+
+def test_parse_attach_file():
+    from agent.parser import AttachFileCommand
+
+    cmd = parse_command("ATTACH_FILE [invoice.pdf]")
+    assert isinstance(cmd, AttachFileCommand)
+    assert cmd.filename == "invoice.pdf"
+
+
+def test_parse_attach_file_with_space_alias():
+    from agent.parser import AttachFileCommand
+
+    # Planner sometimes drops the underscore.
+    cmd = parse_command("ATTACH FILE [resume.docx]")
+    assert isinstance(cmd, AttachFileCommand)
+    assert cmd.filename == "resume.docx"
+
+
+def test_parse_capture_for_ai_no_filename():
+    from agent.parser import CaptureForAiCommand
+
+    cmd = parse_command("CAPTURE_FOR_AI")
+    assert isinstance(cmd, CaptureForAiCommand)
+    assert cmd.filename == ""
+
+
+def test_parse_capture_for_ai_with_filename():
+    from agent.parser import CaptureForAiCommand
+
+    cmd = parse_command("CAPTURE_FOR_AI [snapshot.png]")
+    assert isinstance(cmd, CaptureForAiCommand)
+    assert cmd.filename == "snapshot.png"

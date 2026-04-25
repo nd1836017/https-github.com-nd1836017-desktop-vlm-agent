@@ -20,9 +20,27 @@ from .artifacts import ArtifactWriter
 from .config import Config
 from .cost import RpdGuard
 from .executor import execute, execute_click_pixels
+from .files import (
+    FileMode,
+    FileWorkspace,
+    execute_attach_file,
+    execute_capture_for_ai,
+    execute_download,
+    format_features_summary,
+    inspect_features,
+    resolve_mode,
+)
 from .history import History, render_command
 from .ocr import find_text_center
-from .parser import ClickCommand, ClickTextCommand, PauseCommand, parse_command
+from .parser import (
+    AttachFileCommand,
+    CaptureForAiCommand,
+    ClickCommand,
+    ClickTextCommand,
+    DownloadCommand,
+    PauseCommand,
+    parse_command,
+)
 from .screen import (
     ScreenGeometry,
     annotate_candidates,
@@ -31,7 +49,7 @@ from .screen import (
     detect_geometry,
 )
 from .state import AgentState, load_state, save_state
-from .tasks_loader import TasksLoadError, load_tasks
+from .tasks_loader import TasksLoadError, TaskStep, load_steps, load_tasks
 from .vlm import GeminiClient, VerificationResult
 
 
@@ -238,6 +256,7 @@ def _attempt_step(
     type_max_interval_seconds: float = 0.02,
     log_redact_type: bool = True,
     artifact_writer: ArtifactWriter | None = None,
+    workspace: FileWorkspace | None = None,
     step_idx: int = 0,
 ) -> tuple[VerificationResult | PauseRequested, str]:
     """Run one plan/execute/verify attempt and return (verdict, action_text).
@@ -276,6 +295,39 @@ def _attempt_step(
             if artifact_writer is not None:
                 artifact_writer.save_plan(step_idx, raw, f"PAUSE [{cmd.reason}]")
             return PauseRequested(reason=cmd.reason, raw=raw), f"PAUSE [{cmd.reason}]"
+
+        # File primitives: synthesize PASS/FAIL based on the command's own
+        # success — skip the visual verifier because DOWNLOAD/CAPTURE_FOR_AI
+        # don't change the screen and ATTACH_FILE's effect (the file path
+        # text in a dialog) the verifier already covers via the next step.
+        if isinstance(cmd, (DownloadCommand, AttachFileCommand, CaptureForAiCommand)):
+            if workspace is None:
+                return (
+                    VerificationResult(
+                        passed=False,
+                        reason=(
+                            "Internal error: file command emitted but no "
+                            "FileWorkspace was set up for this run."
+                        ),
+                    ),
+                    f"<{cmd.kind} blocked — no workspace>",
+                )
+            if isinstance(cmd, DownloadCommand):
+                ok, action_text = execute_download(cmd, workspace)
+            elif isinstance(cmd, AttachFileCommand):
+                ok, action_text = execute_attach_file(cmd, workspace)
+            else:
+                ok, action_text = execute_capture_for_ai(
+                    cmd, workspace, screenshot=screenshot
+                )
+            log.info("Action: %s", action_text)
+            if artifact_writer is not None:
+                artifact_writer.save_plan(step_idx, raw, action_text)
+                artifact_writer.save_verdict(step_idx, ok, action_text)
+            return (
+                VerificationResult(passed=ok, reason=action_text),
+                action_text,
+            )
 
         if isinstance(cmd, ClickTextCommand):
             ok, action_text = _execute_click_text(
@@ -368,6 +420,7 @@ def run_step(
     log_redact_type: bool = True,
     replan_counter: ReplanCounter | None = None,
     artifact_writer: ArtifactWriter | None = None,
+    workspace: FileWorkspace | None = None,
     step_idx: int = 0,
     pause_handler: Callable[[str], bool] | None = None,
 ) -> VerificationResult:
@@ -449,6 +502,7 @@ def run_step(
             type_max_interval_seconds=type_max_interval_seconds,
             log_redact_type=log_redact_type,
             artifact_writer=artifact_writer,
+            workspace=workspace,
             step_idx=step_idx,
         )
 
@@ -519,9 +573,11 @@ def run(
     config: Config,
     resume: bool = False,
     csv_override: Path | None = None,
+    cli_file_mode: FileMode | None = None,
+    cli_workdir: Path | None = None,
 ) -> int:
     try:
-        steps = read_tasks(config.tasks_file, csv_override=csv_override)
+        steps = load_steps(config.tasks_file, csv_override=csv_override)
     except (TasksLoadError, FileNotFoundError) as exc:
         log.error("Failed to load tasks file %s: %s", config.tasks_file, exc)
         print(f"[tasks error] {exc}", file=sys.stderr)
@@ -529,6 +585,38 @@ def run(
     if not steps:
         log.error("No steps found in %s", config.tasks_file)
         return 2
+
+    # Inspect what's actually in the tasks file so we only prompt for
+    # features the run actually needs. A simple "press Win, type Notepad"
+    # task should not have to answer questions about file modes.
+    features = inspect_features(steps)
+    summary = format_features_summary(features, total_steps=len(steps))
+    print(summary)
+    log.info("%s", summary)
+
+    workspace: FileWorkspace | None = None
+    if features.uses_files:
+        # Only ask about download persistence when the tasks file actually
+        # uses file primitives. CLI / env values still take precedence so
+        # unattended (.exe) runs never prompt.
+        file_mode, workdir = resolve_mode(
+            cli_mode=cli_file_mode,
+            cli_workdir=cli_workdir,
+            env_mode=config.file_mode,
+            env_workdir=config.workdir,
+            interactive=True,
+        )
+        try:
+            workspace = FileWorkspace.create(mode=file_mode, workdir=workdir)
+        except (OSError, ValueError) as exc:
+            log.error("Could not set up file workspace: %s", exc)
+            print(f"[workspace error] {exc}", file=sys.stderr)
+            return 2
+        log.info(
+            "File mode: %s%s",
+            workspace.mode.value,
+            f" (workdir={workspace.root})" if workspace.root else "",
+        )
 
     # Checkpoint handling.
     existing_state = load_state(config.state_file) if resume else None
@@ -585,67 +673,96 @@ def run(
         start_idx,
     )
 
-    for idx in range(start_idx, len(steps) + 1):
-        step = steps[idx - 1]
-        log.info("=" * 60)
-        log.info("Step %d/%d: %s", idx, len(steps), step)
-        log.info("=" * 60)
+    success = False
+    try:
+        for idx in range(start_idx, len(steps) + 1):
+            task_step: TaskStep = steps[idx - 1]
+            step_text = task_step.text
+            log.info("=" * 60)
+            if task_step.row_index is not None:
+                log.info(
+                    "Step %d/%d (row %d of %s): %s",
+                    idx,
+                    len(steps),
+                    task_step.row_index,
+                    task_step.csv_name,
+                    step_text,
+                )
+            else:
+                log.info("Step %d/%d: %s", idx, len(steps), step_text)
+            log.info("=" * 60)
+            if workspace is not None:
+                workspace.begin_step(
+                    row_index=task_step.row_index,
+                    csv_name=task_step.csv_name,
+                )
 
-        result = run_step(
-            step=step,
-            vlm=vlm,
-            geometry=geometry,
-            animation_buffer=config.animation_buffer_seconds,
-            max_parse_retries=config.max_step_retries,
-            max_replans=config.max_replans_per_step,
-            history=history,
-            enable_two_stage_click=config.enable_two_stage_click,
-            two_stage_crop_size_px=config.two_stage_crop_size_px,
-            max_click_candidates=config.max_click_candidates,
-            click_min_delay_seconds=config.click_min_delay_seconds,
-            click_max_delay_seconds=config.click_max_delay_seconds,
-            type_min_interval_seconds=config.type_min_interval_seconds,
-            type_max_interval_seconds=config.type_max_interval_seconds,
-            log_redact_type=config.log_redact_type,
-            replan_counter=replan_counter,
-            artifact_writer=artifact_writer,
-            step_idx=idx,
-        )
-
-        # action_text is resolved inside the writer from the most recent
-        # save_plan() call for this step — no placeholder needed.
-        artifact_writer.append_summary(
-            step_idx=idx,
-            step_text=step,
-            passed=result.passed,
-            reason=result.reason,
-        )
-
-        if not result.passed:
-            msg = (
-                f"\n[!] HALT at step {idx}/{len(steps)}: {step}\n"
-                f"    Reason: {result.reason}\n"
-                f"    (Exhausted replan budget of {config.max_replans_per_step}.)\n"
-                f"    Run `python -m agent --resume` after fixing the blocker to continue.\n"
-                "    The agent has stopped to prevent runaway actions."
+            result = run_step(
+                step=step_text,
+                vlm=vlm,
+                geometry=geometry,
+                animation_buffer=config.animation_buffer_seconds,
+                max_parse_retries=config.max_step_retries,
+                max_replans=config.max_replans_per_step,
+                history=history,
+                enable_two_stage_click=config.enable_two_stage_click,
+                two_stage_crop_size_px=config.two_stage_crop_size_px,
+                max_click_candidates=config.max_click_candidates,
+                click_min_delay_seconds=config.click_min_delay_seconds,
+                click_max_delay_seconds=config.click_max_delay_seconds,
+                type_min_interval_seconds=config.type_min_interval_seconds,
+                type_max_interval_seconds=config.type_max_interval_seconds,
+                log_redact_type=config.log_redact_type,
+                replan_counter=replan_counter,
+                artifact_writer=artifact_writer,
+                workspace=workspace,
+                step_idx=idx,
             )
-            print(msg, file=sys.stderr)
-            log.error("Halting execution: %s", result.reason)
-            return 1
 
-        # Commit progress to disk before moving on.
-        state = state.advance()
-        try:
-            save_state(config.state_file, state)
-        except OSError as exc:
-            log.warning("Failed to save checkpoint to %s: %s", config.state_file, exc)
+            # action_text is resolved inside the writer from the most recent
+            # save_plan() call for this step — no placeholder needed.
+            artifact_writer.append_summary(
+                step_idx=idx,
+                step_text=step_text,
+                passed=result.passed,
+                reason=result.reason,
+            )
 
-        # RPD guard: halt cleanly between steps so the checkpoint is consistent.
-        if rpd_guard.should_halt():
-            print("\n[!] " + rpd_guard.halt_message(), file=sys.stderr)
-            log.error("Halting execution: %s", rpd_guard.halt_message())
-            return 1
+            if not result.passed:
+                msg = (
+                    f"\n[!] HALT at step {idx}/{len(steps)}: {step_text}\n"
+                    f"    Reason: {result.reason}\n"
+                    f"    (Exhausted replan budget of {config.max_replans_per_step}.)\n"
+                    f"    Run `python -m agent --resume` after fixing the blocker to continue.\n"
+                    "    The agent has stopped to prevent runaway actions."
+                )
+                print(msg, file=sys.stderr)
+                log.error("Halting execution: %s", result.reason)
+                return 1
 
-    log.info("All %d step(s) completed successfully.", len(steps))
-    print(f"[ok] All {len(steps)} step(s) completed successfully.")
-    return 0
+            # Commit progress to disk before moving on.
+            state = state.advance()
+            try:
+                save_state(config.state_file, state)
+            except OSError as exc:
+                log.warning(
+                    "Failed to save checkpoint to %s: %s", config.state_file, exc
+                )
+
+            # RPD guard: halt cleanly between steps so the checkpoint is consistent.
+            if rpd_guard.should_halt():
+                print("\n[!] " + rpd_guard.halt_message(), file=sys.stderr)
+                log.error("Halting execution: %s", rpd_guard.halt_message())
+                return 1
+
+        log.info("All %d step(s) completed successfully.", len(steps))
+        print(f"[ok] All {len(steps)} step(s) completed successfully.")
+        success = True
+        return 0
+    finally:
+        # Workspace cleanup is the last thing we do — temp dirs are wiped on
+        # success, kept on failure so the user can inspect downloads, and
+        # save / feed modes are no-ops here. Skipped entirely when the
+        # tasks file didn't use any file primitives.
+        if workspace is not None:
+            workspace.finalize(success=success)

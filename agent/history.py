@@ -10,10 +10,13 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from .parser import (
+    AttachFileCommand,
+    CaptureForAiCommand,
     ClickCommand,
     ClickTextCommand,
     Command,
     DoubleClickCommand,
+    DownloadCommand,
     DragCommand,
     MoveToCommand,
     PauseCommand,
@@ -64,6 +67,16 @@ def render_command(cmd: Command, *, redact_type: bool = False) -> str:
         return f"CLICK_TEXT [{cmd.label}]"
     if isinstance(cmd, PauseCommand):
         return f"PAUSE [{cmd.reason}]"
+    if isinstance(cmd, DownloadCommand):
+        if cmd.filename:
+            return f"DOWNLOAD [{cmd.url}, {cmd.filename}]"
+        return f"DOWNLOAD [{cmd.url}]"
+    if isinstance(cmd, AttachFileCommand):
+        return f"ATTACH_FILE [{cmd.filename}]"
+    if isinstance(cmd, CaptureForAiCommand):
+        if cmd.filename:
+            return f"CAPTURE_FOR_AI [{cmd.filename}]"
+        return "CAPTURE_FOR_AI"
     return str(cmd)
 
 

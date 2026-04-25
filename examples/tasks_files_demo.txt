@@ -1,0 +1,14 @@
+# Example: download an invoice PDF for each row in data.csv, attach it to a form.
+# Run with: python -m agent --mode save --workdir ./out --csv examples/data_demo.csv
+#
+# In a real run the planner would emit DOWNLOAD / ATTACH_FILE itself based on
+# natural-language steps. This file is hand-written so the feature-detection
+# in `agent.files.inspect_features` recognises the run as needing a workspace.
+
+FOR_EACH_ROW [examples/data_demo.csv]
+  Open the customer portal and DOWNLOAD [https://example.com/invoice/{{row.first_name}}.pdf, invoice_{{row.first_name}}.pdf]
+  Open the support form
+  Click "Browse" to open the file picker
+  ATTACH_FILE [invoice_{{row.first_name}}.pdf]
+  Click "Submit" and wait for the success toast
+END_FOR_EACH_ROW

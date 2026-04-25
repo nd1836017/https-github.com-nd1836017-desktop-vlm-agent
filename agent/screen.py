@@ -74,6 +74,24 @@ def image_to_png_bytes(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
+def image_signature(img: Image.Image, downsample: int = 16) -> str:
+    """Return a compact perceptual fingerprint of ``img`` as a hex string.
+
+    Used by the stuck-step detector to decide "did anything visible change
+    between attempts on this step?". The image is downsampled hard
+    (default 16x16 grayscale) and hashed; this is robust to tiny
+    cursor-blink / GIF / clock-tick differences while still catching real
+    UI state changes.
+    """
+    import hashlib
+
+    thumb = img.convert("L").resize(
+        (downsample, downsample), Image.Resampling.NEAREST
+    )
+    raw = thumb.tobytes()
+    return hashlib.sha1(raw, usedforsecurity=False).hexdigest()
+
+
 @dataclass(frozen=True)
 class CropResult:
     """A cropped region of the full screenshot.

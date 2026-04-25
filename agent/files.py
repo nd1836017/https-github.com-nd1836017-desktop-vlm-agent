@@ -595,6 +595,10 @@ class RunFeatures:
     attach_file_count: int = 0
     uses_capture_for_ai: bool = False
     capture_for_ai_count: int = 0
+    uses_variables: bool = False
+    remember_count: int = 0
+    recall_count: int = 0
+    var_placeholder_count: int = 0
 
     @property
     def uses_files(self) -> bool:
@@ -617,6 +621,18 @@ _ATTACH_FILE_HINT_RE = re.compile(r"\bATTACH[_\s]?FILE\s*\[", re.IGNORECASE)
 _CAPTURE_FOR_AI_HINT_RE = re.compile(
     r"\bCAPTURE[_\s]?FOR[_\s]?AI\s*\[", re.IGNORECASE
 )
+# REMEMBER / RECALL only count when written as bracketed primitives so casual
+# prose ("please remember to click Submit") never trips the variable-store
+# setup. Mirrors the parser's regex shape (alphanumeric + underscore name).
+_REMEMBER_HINT_RE = re.compile(
+    r"\bREMEMBER\s*\[\s*[A-Za-z_][\w]*", re.IGNORECASE
+)
+_RECALL_HINT_RE = re.compile(
+    r"\bRECALL\s*\[\s*[A-Za-z_][\w]*\s*\]", re.IGNORECASE
+)
+_VAR_PLACEHOLDER_HINT_RE = re.compile(
+    r"\{\{\s*var\.[A-Za-z_][\w]*"
+)
 
 
 def inspect_features(steps) -> RunFeatures:
@@ -633,6 +649,9 @@ def inspect_features(steps) -> RunFeatures:
     download = 0
     attach = 0
     capture = 0
+    remember = 0
+    recall = 0
+    var_placeholder = 0
 
     for step in steps:
         # Heuristic flags from natural-language text. We match the literal
@@ -644,6 +663,12 @@ def inspect_features(steps) -> RunFeatures:
             attach += 1
         if _CAPTURE_FOR_AI_HINT_RE.search(step.text):
             capture += 1
+        if _REMEMBER_HINT_RE.search(step.text):
+            remember += 1
+        if _RECALL_HINT_RE.search(step.text):
+            recall += 1
+        if _VAR_PLACEHOLDER_HINT_RE.search(step.text):
+            var_placeholder += 1
         # Row metadata is set by the loader for every step expanded out
         # of a FOR_EACH_ROW block.
         if step.row_index is not None:
@@ -661,6 +686,10 @@ def inspect_features(steps) -> RunFeatures:
         attach_file_count=attach,
         uses_capture_for_ai=capture > 0,
         capture_for_ai_count=capture,
+        uses_variables=(remember > 0 or recall > 0 or var_placeholder > 0),
+        remember_count=remember,
+        recall_count=recall,
+        var_placeholder_count=var_placeholder,
     )
 
 
@@ -681,8 +710,18 @@ def format_features_summary(features: RunFeatures, *, total_steps: int) -> str:
         lines.append(f"  - ATTACH_FILE × {features.attach_file_count}")
     if features.uses_capture_for_ai:
         lines.append(f"  - CAPTURE_FOR_AI × {features.capture_for_ai_count}")
+    if features.remember_count:
+        lines.append(f"  - REMEMBER × {features.remember_count}")
+    if features.recall_count:
+        lines.append(f"  - RECALL × {features.recall_count}")
+    if features.var_placeholder_count:
+        lines.append(
+            f"  - {{{{var.*}}}} placeholders × {features.var_placeholder_count}"
+        )
     if not (
-        features.uses_csv_loop or features.uses_files
+        features.uses_csv_loop
+        or features.uses_files
+        or features.uses_variables
     ):
         lines.append("  - (no special features detected)")
     return "\n".join(lines)

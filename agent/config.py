@@ -42,6 +42,9 @@ class Config:
     file_mode: FileMode | None
     workdir: Path | None
     log_level: str
+    # Tier 4 reliability: per-step wall-clock timeout and stuck-step detection.
+    step_timeout_seconds: float
+    stuck_step_threshold: int
 
     @classmethod
     def load(cls) -> Config:
@@ -91,6 +94,12 @@ class Config:
             file_mode=_env_file_mode(),
             workdir=_env_workdir(),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+            step_timeout_seconds=float(
+                os.getenv("STEP_TIMEOUT_SECONDS", "180.0")
+            ),
+            stuck_step_threshold=int(
+                os.getenv("STUCK_STEP_THRESHOLD", "3")
+            ),
         )
         if cfg.rpd_warn_threshold >= cfg.rpd_halt_threshold:
             raise ValueError(

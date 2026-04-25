@@ -10,12 +10,15 @@ import json
 import logging
 import os
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-STATE_SCHEMA_VERSION = 1
+# Schema 2 added the variable-store snapshot. Schema 1 checkpoints are still
+# accepted (loader treats missing ``variables`` as an empty dict) so users
+# upgrading mid-run don't lose their progress.
+STATE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -24,6 +27,7 @@ class AgentState:
     tasks_file: str
     total_steps: int
     last_completed_step: int  # 1-indexed; 0 means "nothing completed yet"
+    variables: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def initial(cls, tasks_file: Path, total_steps: int) -> AgentState:
@@ -32,6 +36,7 @@ class AgentState:
             tasks_file=str(tasks_file),
             total_steps=total_steps,
             last_completed_step=0,
+            variables={},
         )
 
     def advance(self) -> AgentState:
@@ -40,6 +45,17 @@ class AgentState:
             tasks_file=self.tasks_file,
             total_steps=self.total_steps,
             last_completed_step=self.last_completed_step + 1,
+            variables=dict(self.variables),
+        )
+
+    def with_variables(self, variables: dict[str, str]) -> AgentState:
+        """Return a copy with ``variables`` replaced (used after each step)."""
+        return AgentState(
+            version=self.version,
+            tasks_file=self.tasks_file,
+            total_steps=self.total_steps,
+            last_completed_step=self.last_completed_step,
+            variables=dict(variables),
         )
 
 
@@ -49,11 +65,19 @@ def load_state(path: Path) -> AgentState | None:
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        # variables is optional for backward compat with v1 checkpoints.
+        raw_vars = data.get("variables") or {}
+        variables: dict[str, str] = {}
+        if isinstance(raw_vars, dict):
+            for k, v in raw_vars.items():
+                if isinstance(k, str):
+                    variables[k] = "" if v is None else str(v)
         return AgentState(
             version=int(data["version"]),
             tasks_file=str(data["tasks_file"]),
             total_steps=int(data["total_steps"]),
             last_completed_step=int(data["last_completed_step"]),
+            variables=variables,
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         log.warning("Ignoring unreadable state file %s: %s", path, exc)

@@ -312,6 +312,11 @@ The VLM is instructed to respond with exactly one of the following:
 | `DOWNLOAD [url, filename]` | `DOWNLOAD [https://example.com/inv.pdf, inv.pdf]` | Fetches a URL via HTTPS and stores it in the run's file workspace. `filename` is optional; when missing it's derived from the URL. The URL/FILENAME delimiter is **comma followed by at least one space** (so URLs like `?ids=1,2,3` aren't truncated). Honors the run's file mode (temp/save/feed). |
 | `ATTACH_FILE [filename]` | `ATTACH_FILE [inv.pdf]` | Pastes a path into the focused OS file-picker (`Ctrl+L` → paste → Enter) via the system clipboard, so non-ASCII filenames work. The agent must already have clicked the dialog's Browse button. `filename` is resolved against the workspace first, then the disk. |
 | `CAPTURE_FOR_AI [filename]` | `CAPTURE_FOR_AI []` | Buffers an image for the next plan call. **Brackets are required** (empty `[]` = grab the current screen; otherwise reads `filename` from the workspace or disk). Useful for "look at this PDF and tell me the invoice number". |
+| `REMEMBER [name]` | `REMEMBER [order_id]` | Reads the value labeled `name` off the current screen (via VLM) and stores it as a run variable. Use when later steps need a value (order id, confirmation number, etc.) that is currently visible. The variable name must match `[A-Za-z_][A-Za-z0-9_]*`. |
+| `REMEMBER [name = value]` | `REMEMBER [order_id = ND12345]` | Stores `value` literally as `name` with no VLM extraction — useful when the value came from a prior CAPTURE_FOR_AI. |
+| `RECALL [name]` | `RECALL [order_id]` | Types the stored value of `name` into the focused field. Equivalent to `TYPE [{{var.name}}]`. Fails loudly if `name` is unset. |
+
+You can also reference variables anywhere in step text via the `{{var.<name>}}` placeholder — for example, `open the page about {{var.order_id}}`. Use `{{var.<name>|default}}` to fall back when the variable is unset. Substitution happens at step run-time, so a step can use a variable set by an earlier `REMEMBER` step. Variables persist across `--resume` (snapshotted in the checkpoint).
 
 The parser is lenient — it recovers from conversational wrapping, missing brackets, or parentheses in place of brackets.
 
@@ -334,6 +339,15 @@ Choose [t/s/f]:
 Tasks files that don't use any file primitives skip this prompt entirely. For unattended runs (`.exe`, scheduled jobs), set `FILE_MODE` / `WORKDIR` in `.env` or pass `--mode` / `--workdir` on the CLI.
 
 Inside `FOR_EACH_ROW`, file names are suffixed with `(rowN)` to prevent collisions: `invoice.pdf` on row 50 becomes `invoice(row50).pdf`.
+
+### Reliability: timeouts and stuck-step detection
+
+Two safeguards stop a single bad step from burning the whole replan budget (or the daily RPD quota):
+
+- **Per-step wall-clock timeout** — `STEP_TIMEOUT_SECONDS` (default `180`). When the elapsed wall time on a step exceeds the budget the agent stops trying and fails the step with a clear reason. Includes parse retries, replans, and `PAUSE` waits. Set to `0` to disable.
+- **Stuck-step detection** — `STUCK_STEP_THRESHOLD` (default `3`). After each failed attempt the agent fingerprints the post-action screenshot. If the last `N` attempts produced **identical** screen state, the step bails early instead of replanning into the same dead-end. Set to `0` to disable.
+
+Both safeguards halt cleanly between steps with the checkpoint intact — fix the underlying problem (a frozen modal, an offline page) and `python -m agent --resume` continues from where it stopped.
 
 ---
 

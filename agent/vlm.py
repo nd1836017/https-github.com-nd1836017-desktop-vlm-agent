@@ -187,6 +187,28 @@ def _parse_verify_response_json(text: str) -> VerifyResponseModel | None:
         return None
 
 
+def _parse_extract_response_json(text: str):
+    """Best-effort JSON -> ExtractResponseModel for extract_value's safety net.
+
+    Returns ``None`` if the text isn't valid JSON in the expected shape.
+    Defined here as a module function (mirroring ``_parse_verify_response_json``)
+    so it can be unit-tested independently of the live VLM client.
+    """
+    stripped = _strip_markdown_fences(text)
+    if not stripped:
+        return None
+    try:
+        payload = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return ExtractResponseModel.model_validate(payload)
+    except ValidationError:
+        return None
+
+
 def plan_response_to_command(resp: PlanResponseModel) -> Command | None:
     """Convert a parsed JSON schema response into a Command instance."""
     kind = (resp.command or "").upper().strip()
@@ -519,6 +541,14 @@ class GeminiClient:
         self._disambig_config = types.GenerateContentConfig(
             system_instruction=DISAMBIG_SYSTEM_PROMPT,
         )
+        self._extract_config = types.GenerateContentConfig(
+            system_instruction=EXTRACT_SYSTEM_PROMPT,
+        )
+        self._extract_config_json = types.GenerateContentConfig(
+            system_instruction=EXTRACT_SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            response_schema=ExtractResponseModel,
+        )
         log.info(
             "Initialized Gemini client with model=%s (json_output=%s)",
             model_name,
@@ -796,3 +826,82 @@ class GeminiClient:
         if pick < 0 or pick > num_candidates:
             return 0
         return pick
+
+    def extract_value(
+        self,
+        name: str,
+        screenshot: Image.Image,
+        hint: str = "",
+    ) -> ExtractionResult:
+        """Ask the VLM to read the value of ``name`` off the screen.
+
+        Used by the REMEMBER primitive when no literal is given. ``name`` is a
+        plain identifier like ``order_id``; ``hint`` is an optional natural
+        language sentence elaborating on what to look for (e.g. "the
+        confirmation number, formatted as 12 digits with dashes").
+
+        Returns an ExtractionResult; on failure the caller treats the step as
+        FAIL and the replan loop kicks in.
+        """
+        parts = [f"NAME: {name}"]
+        if hint:
+            parts.append(f"HINT: {hint}")
+        parts.append(
+            "Find the value of NAME on the screen. "
+            "Respond with the literal value or NONE."
+        )
+        prompt = "\n\n".join(parts)
+
+        if self._enable_json_output:
+            response = self._generate(
+                "extract_value_json",
+                [prompt, screenshot],
+                self._extract_config_json,
+            )
+            text = (response.text or "").strip()
+            log.debug("extract_value response (json): %r", text)
+
+            parsed = getattr(response, "parsed", None)
+            if not isinstance(parsed, ExtractResponseModel):
+                # Manual JSON decode as a safety net.
+                parsed = _parse_extract_response_json(text)
+
+            if isinstance(parsed, ExtractResponseModel):
+                if parsed.found and parsed.value.strip():
+                    return ExtractionResult(
+                        found=True,
+                        value=parsed.value.strip(),
+                        raw=text,
+                    )
+                return ExtractionResult(found=False, value="", raw=text)
+            # Last-ditch text parse.
+            return self._parse_extract_text(text)
+
+        response = self._generate(
+            "extract_value", [prompt, screenshot], self._extract_config
+        )
+        text = (response.text or "").strip()
+        log.debug("extract_value response: %r", text)
+        return self._parse_extract_text(text)
+
+    @staticmethod
+    def _parse_extract_text(text: str) -> ExtractionResult:
+        """Parse a free-form extract response into an ExtractionResult."""
+        if not text:
+            return ExtractionResult(found=False, value="", raw="")
+        upper = text.strip().upper()
+        if upper == "NONE" or upper.startswith("NONE\n"):
+            return ExtractionResult(found=False, value="", raw=text)
+        # Strip the optional ``VALUE: `` prefix the system prompt asks for.
+        m = re.match(r"\s*VALUE\s*:\s*(.*)", text, re.IGNORECASE | re.DOTALL)
+        if m:
+            value = m.group(1).strip()
+        else:
+            # Free-form: take the first non-empty line as the value.
+            value = next(
+                (line.strip() for line in text.splitlines() if line.strip()),
+                "",
+            )
+        if not value or value.upper() == "NONE":
+            return ExtractionResult(found=False, value="", raw=text)
+        return ExtractionResult(found=True, value=value, raw=text)

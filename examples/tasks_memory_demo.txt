@@ -1,0 +1,36 @@
+# Memory demo — REMEMBER / RECALL / {{var.*}}
+#
+# Scenario: agent reads an order id off an invoice PDF that's already on
+# screen, then types it into a search box on a different page so it can
+# look up the matching shipment.
+#
+# How it works:
+#   - REMEMBER [order_id] asks the VLM to extract the order id off the
+#     current screen and stores it as a run variable.
+#   - {{var.order_id}} in a later step is replaced at run time with that
+#     value. (Distinct from {{row.field}}, which is replaced at load time
+#     from a CSV row.)
+#   - RECALL [order_id] is a shorthand for TYPE [{{var.order_id}}] —
+#     types the stored value into whatever field currently has focus.
+#
+# Variables survive --resume: if the agent crashes between REMEMBER and
+# RECALL, the checkpoint snapshot still has the value, so resuming
+# continues without redoing the extraction.
+
+# Step 1: read the order id off the invoice PDF on screen.
+REMEMBER [order_id]
+
+# Step 2: open a new tab so we can search for it.
+press ctrl+t
+
+# Step 3: type a search URL that includes the captured value.
+type https://shipments.example.com/lookup?q={{var.order_id}}
+
+# Step 4: load the page.
+press enter
+
+# Step 5: focus the on-page search box and type the order id again
+# (RECALL is the typing-only shortcut for {{var.order_id}}).
+click on the order-number search box
+RECALL [order_id]
+press enter

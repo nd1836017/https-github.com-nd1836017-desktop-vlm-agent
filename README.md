@@ -309,8 +309,31 @@ The VLM is instructed to respond with exactly one of the following:
 | `DRAG [X1,Y1,X2,Y2]` | `DRAG [100,200,400,500]` | Click-and-drag from (X1,Y1) to (X2,Y2) on the 0–1000 grid. |
 | `WAIT [SECONDS]` | `WAIT [3]` | Pause execution for N seconds (no VLM call). |
 | `PAUSE [reason]` | `PAUSE [2FA prompt needs manual approval]` | Emitted by the VLM when it sees a 2FA / CAPTCHA / "Verify it's you" screen. Agent halts cleanly with zero side-effects and waits for <kbd>Enter</kbd>. |
+| `DOWNLOAD [url, filename]` | `DOWNLOAD [https://example.com/inv.pdf, inv.pdf]` | Fetches a URL via HTTPS and stores it in the run's file workspace. `filename` is optional; when missing it's derived from the URL. Honors the run's file mode (temp/save/feed). |
+| `ATTACH_FILE [filename]` | `ATTACH_FILE [inv.pdf]` | Types a path into the focused OS file-picker (`Ctrl+L` → path → Enter). The agent must already have clicked the dialog's Browse button. `filename` is resolved against the workspace first, then the disk. |
+| `CAPTURE_FOR_AI [filename]` | `CAPTURE_FOR_AI` | Buffers an image for the next plan call. Without an arg, captures the current screen; with one, reads it from the workspace or disk. Useful for "look at this PDF and tell me the invoice number". |
 
 The parser is lenient — it recovers from conversational wrapping, missing brackets, or parentheses in place of brackets.
+
+### File-handling modes
+
+When the tasks file uses `DOWNLOAD`, `ATTACH_FILE`, or `CAPTURE_FOR_AI`, the agent asks at run start how to persist captured files:
+
+```
+File handling for this run:
+  [t] temp  — auto-cleanup on success, kept on failure for debugging
+  [s] save  — persist all downloads to a directory
+  [f] feed  — never write to disk, only show to the VLM
+Choose [t/s/f]:
+```
+
+- **temp** *(default)* — files go to an OS temp dir, wiped automatically when the run succeeds, preserved on failure so you can inspect what the agent grabbed.
+- **save** — files persist to `--workdir` (or `WORKDIR` from `.env`, defaulting to `./agent_files`).
+- **feed** — files never touch disk; bytes are streamed straight into the next VLM call.
+
+Tasks files that don't use any file primitives skip this prompt entirely. For unattended runs (`.exe`, scheduled jobs), set `FILE_MODE` / `WORKDIR` in `.env` or pass `--mode` / `--workdir` on the CLI.
+
+Inside `FOR_EACH_ROW`, file names are suffixed with `(rowN)` to prevent collisions: `invoice.pdf` on row 50 becomes `invoice(row50).pdf`.
 
 ---
 

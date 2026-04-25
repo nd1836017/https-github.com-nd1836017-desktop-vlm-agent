@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .agent import run
 from .config import Config, configure_logging
+from .files import FileMode
 from .state import reset_state
 
 
@@ -33,6 +34,31 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Override the CSV path used by every FOR_EACH_ROW block in the "
             "tasks file. Useful for swapping demo data for real data without "
             "editing tasks.txt."
+        ),
+    )
+    p.add_argument(
+        "--mode",
+        dest="file_mode",
+        choices=[m.value for m in FileMode],
+        default=None,
+        help=(
+            "How files captured during the run (DOWNLOAD / CAPTURE_FOR_AI) "
+            "should be persisted. 'temp' wipes them on success and keeps "
+            "them on failure; 'save' persists everything to --workdir; "
+            "'feed' never writes to disk and feeds bytes straight to the "
+            "VLM. If omitted you'll be asked at run start (unless FILE_MODE "
+            "is set in .env)."
+        ),
+    )
+    p.add_argument(
+        "--workdir",
+        dest="workdir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "Where downloads land when --mode save is selected. Created if "
+            "it doesn't exist. Defaults to ./agent_files when not supplied."
         ),
     )
     # Two-stage CLICK toggle. Mutually exclusive; if neither is given, we fall
@@ -65,7 +91,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
         config = Config.load()
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
+        # ValueError covers FILE_MODE / RPD threshold validation; RuntimeError
+        # covers missing/blank GEMINI_API_KEY etc. Both surface as "[config error]".
         print(f"[config error] {exc}", file=sys.stderr)
         return 2
 
@@ -78,7 +106,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.reset and not args.resume:
         reset_state(config.state_file)
 
-    return run(config, resume=args.resume, csv_override=args.csv_override)
+    cli_file_mode = FileMode(args.file_mode) if args.file_mode else None
+
+    return run(
+        config,
+        resume=args.resume,
+        csv_override=args.csv_override,
+        cli_file_mode=cli_file_mode,
+        cli_workdir=args.workdir,
+    )
 
 
 if __name__ == "__main__":

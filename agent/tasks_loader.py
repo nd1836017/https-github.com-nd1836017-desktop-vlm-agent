@@ -38,10 +38,26 @@ import csv
 import logging
 import re
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TaskStep:
+    """One expanded instruction with optional FOR_EACH_ROW row metadata.
+
+    ``text`` is the natural-language instruction post-substitution — exactly
+    what the planner will see. ``row_index`` is 1-indexed and ``None``
+    outside a FOR_EACH_ROW block; ``csv_name`` is the basename of the CSV
+    that drove this row.
+    """
+
+    text: str
+    row_index: int | None = None
+    csv_name: str | None = None
 
 
 _FOR_EACH_RE = re.compile(
@@ -84,6 +100,29 @@ def load_tasks(
 
     raw_text = path.read_text(encoding="utf-8-sig")
     lines = raw_text.splitlines()
+    steps = _expand(lines, base_dir=path.parent, csv_override=csv_override)
+    return [s.text for s in steps]
+
+
+def load_steps(
+    path: Path,
+    csv_override: Path | None = None,
+) -> list[TaskStep]:
+    """Like ``load_tasks`` but returns ``TaskStep`` objects with row metadata.
+
+    Use this from the agent run loop so primitives like ``DOWNLOAD`` can
+    suffix filenames with ``(rowN)`` when a step is part of a FOR_EACH_ROW
+    block. ``load_tasks`` is preserved as a thin wrapper for callers that
+    only need the flat string list (notably the test suite).
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"Tasks file not found: {path}")
+
+    if csv_override is not None and not csv_override.is_absolute():
+        csv_override = csv_override.resolve()
+
+    raw_text = path.read_text(encoding="utf-8-sig")
+    lines = raw_text.splitlines()
     return _expand(lines, base_dir=path.parent, csv_override=csv_override)
 
 
@@ -92,8 +131,8 @@ def _expand(
     *,
     base_dir: Path,
     csv_override: Path | None,
-) -> list[str]:
-    out: list[str] = []
+) -> list[TaskStep]:
+    out: list[TaskStep] = []
     in_block = False
     block_csv_path: Path | None = None
     block_lineno: int = 0
@@ -154,7 +193,7 @@ def _expand(
                     f"Line {lineno}: '{{{{row.<field>}}}}' placeholder used "
                     f"outside a FOR_EACH_ROW block (no CSV row to substitute)."
                 )
-            out.append(stripped)
+            out.append(TaskStep(text=stripped))
 
     if in_block:
         raise TasksLoadError(
@@ -170,7 +209,7 @@ def _expand_block(
     *,
     csv_path: Path,
     block_lineno: int,
-) -> list[str]:
+) -> list[TaskStep]:
     if not body:
         log.warning(
             "FOR_EACH_ROW on line %d has an empty body; skipping the loop.",
@@ -189,15 +228,19 @@ def _expand_block(
         return []
 
     fields = list(rows[0].keys())
-    expanded: list[str] = []
+    csv_name = csv_path.name
+    expanded: list[TaskStep] = []
     for row_idx, row in enumerate(rows, start=1):
         for body_lineno, body_line in body:
             try:
-                expanded.append(_substitute(body_line, row=row, fields=fields))
+                text = _substitute(body_line, row=row, fields=fields)
             except TasksLoadError as exc:
                 raise TasksLoadError(
                     f"Line {body_lineno} (row {row_idx} of {csv_path.name}): {exc}"
                 ) from None
+            expanded.append(
+                TaskStep(text=text, row_index=row_idx, csv_name=csv_name)
+            )
     return expanded
 
 

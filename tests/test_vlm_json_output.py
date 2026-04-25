@@ -260,3 +260,71 @@ def test_verify_falls_through_to_text_parser_on_non_json(json_client):
     )
     result = json_client.verify("step", Image.new("RGB", (10, 10)))
     assert result.passed is True
+
+
+# -------------------- File primitives in JSON-output mode -----------------------
+
+
+def test_plan_response_to_command_download():
+    from agent.parser import DownloadCommand
+
+    cmd = plan_response_to_command(
+        PlanResponseModel(
+            command="DOWNLOAD",
+            url="https://example.com/foo.pdf",
+            filename="foo.pdf",
+        )
+    )
+    assert isinstance(cmd, DownloadCommand)
+    assert cmd.url == "https://example.com/foo.pdf"
+    assert cmd.filename == "foo.pdf"
+
+
+def test_plan_response_to_command_download_url_only():
+    from agent.parser import DownloadCommand
+
+    cmd = plan_response_to_command(
+        PlanResponseModel(command="DOWNLOAD", url="https://x/y.pdf")
+    )
+    assert isinstance(cmd, DownloadCommand)
+    assert cmd.filename == ""
+
+
+def test_plan_response_to_command_download_missing_url_returns_none():
+    cmd = plan_response_to_command(
+        PlanResponseModel(command="DOWNLOAD", filename="orphan.pdf")
+    )
+    assert cmd is None
+
+
+def test_plan_response_to_command_attach_file():
+    from agent.parser import AttachFileCommand
+
+    cmd = plan_response_to_command(
+        PlanResponseModel(command="ATTACH_FILE", filename="resume.pdf")
+    )
+    assert isinstance(cmd, AttachFileCommand)
+    assert cmd.filename == "resume.pdf"
+
+
+def test_plan_response_to_command_attach_file_missing_filename_returns_none():
+    cmd = plan_response_to_command(PlanResponseModel(command="ATTACH_FILE"))
+    assert cmd is None
+
+
+def test_plan_response_to_command_capture_for_ai_no_filename():
+    from agent.parser import CaptureForAiCommand
+
+    cmd = plan_response_to_command(PlanResponseModel(command="CAPTURE_FOR_AI"))
+    assert isinstance(cmd, CaptureForAiCommand)
+    assert cmd.filename == ""
+
+
+def test_plan_response_to_command_capture_for_ai_with_filename():
+    from agent.parser import CaptureForAiCommand
+
+    cmd = plan_response_to_command(
+        PlanResponseModel(command="CAPTURE_FOR_AI", filename="snapshot.png")
+    )
+    assert isinstance(cmd, CaptureForAiCommand)
+    assert cmd.filename == "snapshot.png"

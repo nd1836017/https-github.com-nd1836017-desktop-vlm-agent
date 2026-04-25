@@ -90,10 +90,6 @@ class ReplanCounter:
 log = logging.getLogger(__name__)
 
 
-class AgentHalt(RuntimeError):
-    """Raised when the verifier reports the screen state does not match the goal."""
-
-
 @dataclass
 class PauseRequested:
     """Sentinel returned by ``_attempt_step`` when the planner emitted PAUSE.

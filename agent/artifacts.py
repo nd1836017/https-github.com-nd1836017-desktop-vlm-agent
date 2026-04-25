@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from PIL import Image
@@ -45,7 +45,11 @@ class ArtifactWriter:
         writer = cls(enabled=enabled, base_dir=Path(base_dir).expanduser())
         if not enabled:
             return writer
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # UTC so that two runs started seconds apart across a DST
+        # transition can't collide on a folder name (or, worse, sort
+        # backwards). ``files.py`` already uses UTC for its run dirs;
+        # this brings ``ArtifactWriter`` in line.
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%SZ")
         try:
             writer.run_dir = writer.base_dir / ts
             writer.run_dir.mkdir(parents=True, exist_ok=True)

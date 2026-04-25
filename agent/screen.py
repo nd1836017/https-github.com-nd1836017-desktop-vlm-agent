@@ -187,22 +187,36 @@ def annotate_candidates(
     except OSError:
         font = ImageFont.load_default()
 
+    img_w, img_h = annotated.size
     half = box_size_px // 2
+    badge_w, badge_h = 32, 34
     for idx, (cx_norm, cy_norm) in enumerate(candidates, start=1):
         px, py = crop.crop_norm_to_full_pixel(cx_norm, cy_norm)
         left, top = px - half, py - half
         right, bottom = px + half, py + half
         # Red rectangle outline.
         draw.rectangle((left, top, right, bottom), outline=(255, 0, 0), width=4)
-        # White-filled badge with the 1-based number. Keep the badge a
-        # fixed 32x34 rectangle that sits above the candidate's top edge,
-        # clamped to the image bounds. The old `max(0, top-34), max(34, top)`
-        # pair would collapse to zero height when `top` was near 0 (both
-        # edges pinned to 0 or both pinned to 34), hiding the badge.
+        # White-filled badge with the 1-based number. Default position is
+        # directly ABOVE the candidate box. When there isn't enough room
+        # above (top < badge_h) flip the badge BELOW the box so it never
+        # overlaps the candidate target — otherwise the disambiguator
+        # would be looking at a number drawn over the click target. As a
+        # last resort (tiny image), fall back to the top-left corner of
+        # the candidate box.
         label = str(idx)
-        badge_top = max(0, top - 34)
-        badge_bottom = badge_top + 34
-        label_box = (left, badge_top, left + 32, badge_bottom)
+        if top >= badge_h:
+            badge_top = top - badge_h
+        elif bottom + badge_h <= img_h:
+            badge_top = bottom
+        else:
+            badge_top = max(0, top)
+        badge_left = max(0, min(left, img_w - badge_w))
+        label_box = (
+            badge_left,
+            badge_top,
+            badge_left + badge_w,
+            badge_top + badge_h,
+        )
         draw.rectangle(label_box, fill=(255, 255, 255), outline=(255, 0, 0), width=2)
         draw.text(
             (label_box[0] + 6, label_box[1] + 2),

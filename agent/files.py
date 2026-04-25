@@ -389,9 +389,15 @@ _USER_AGENT = (
 def _filename_from_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
     base = os.path.basename(parsed.path) or "download.bin"
-    if "." not in base:
-        # No extension; punt with a generic suffix so the dialog doesn't
-        # treat it as a directory.
+    # Use ``Path(...).suffix`` instead of ``"." not in base`` so a name
+    # like ``invoice-v2`` (a real "no-extension" filename that happens to
+    # contain a dot) still gets ``.bin`` appended. The old heuristic only
+    # fired when the name had zero dots anywhere, which left bare path
+    # segments like ``download`` correct but mishandled ``invoice-v2``,
+    # ``backup_2026.04.25``, ``run.final``, etc.
+    if not Path(base).suffix:
+        # No extension; punt with a generic suffix so the file dialog
+        # doesn't treat it as a directory.
         base = base + ".bin"
     return base
 
@@ -588,6 +594,7 @@ class RunFeatures:
 
     uses_csv_loop: bool = False
     csv_row_count: int = 0
+    csv_step_count: int = 0
     csv_files: tuple[str, ...] = ()
     uses_downloads: bool = False
     download_count: int = 0
@@ -645,6 +652,7 @@ def inspect_features(steps) -> RunFeatures:
     the user's intent is already visible in the source text.
     """
     csv_rows = 0
+    csv_steps = 0
     csv_files: set[str] = set()
     download = 0
     attach = 0
@@ -670,15 +678,23 @@ def inspect_features(steps) -> RunFeatures:
         if _VAR_PLACEHOLDER_HINT_RE.search(step.text):
             var_placeholder += 1
         # Row metadata is set by the loader for every step expanded out
-        # of a FOR_EACH_ROW block.
+        # of a FOR_EACH_ROW block. ``csv_rows`` tracks the highest row
+        # index seen (= number of CSV rows, since rows are 1-indexed and
+        # contiguous). ``csv_steps`` is the actual expanded step count
+        # across the whole loop — needed by ``format_features_summary``
+        # so the summary line shows real numbers (e.g. "50 rows × 3
+        # inner steps = 150 expanded") instead of the unhelpful "50 rows
+        # × inner steps" we used to print.
         if step.row_index is not None:
             csv_rows = max(csv_rows, step.row_index)
+            csv_steps += 1
             if step.csv_name:
                 csv_files.add(step.csv_name)
 
     return RunFeatures(
         uses_csv_loop=csv_rows > 0,
         csv_row_count=csv_rows,
+        csv_step_count=csv_steps,
         csv_files=tuple(sorted(csv_files)),
         uses_downloads=download > 0,
         download_count=download,
@@ -697,13 +713,25 @@ def format_features_summary(features: RunFeatures, *, total_steps: int) -> str:
     """Return a one-paragraph human-readable rundown of detected features."""
     lines = [f"Tasks loaded: {total_steps} step(s)"]
     if features.uses_csv_loop:
-        suffix = (
-            f"({features.csv_row_count} rows × inner steps "
-            f"from {', '.join(features.csv_files)})"
+        # Show the real expanded step count. We deliberately do NOT
+        # display "rows × inner = expanded" here: when a tasks file has
+        # more than one FOR_EACH_ROW block (or two blocks pointing at
+        # different CSVs with different inner-step counts), the equation
+        # doesn't hold — ``csv_row_count`` is ``max(row_index)`` across
+        # all blocks, while ``csv_step_count`` is the total expanded
+        # count summed across blocks, so dividing the second by the
+        # first produces a wrong "inner" number and a misleading
+        # equation. Listing the expanded total + CSV files is always
+        # correct and is what the user actually wants to know.
+        expanded = features.csv_step_count
+        from_part = (
+            f" from {', '.join(features.csv_files)}"
             if features.csv_files
-            else f"({features.csv_row_count} rows)"
+            else ""
         )
-        lines.append(f"  - FOR_EACH_ROW {suffix}")
+        lines.append(
+            f"  - FOR_EACH_ROW ({expanded} expanded step(s){from_part})"
+        )
     if features.uses_downloads:
         lines.append(f"  - DOWNLOAD × {features.download_count}")
     if features.uses_attach_file:

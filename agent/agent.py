@@ -963,6 +963,9 @@ def run(
         retry_max_delay_seconds=config.gemini_retry_max_delay_seconds,
         enable_json_output=config.enable_json_output,
         rpd_guard=rpd_guard,
+        image_max_dim=config.vlm_image_max_dim,
+        image_quality=config.vlm_image_quality,
+        skip_identical_frames=config.vlm_skip_identical_frames,
     )
     history = History(window=config.history_window)
     replan_counter = ReplanCounter(total_max=config.max_total_replans)

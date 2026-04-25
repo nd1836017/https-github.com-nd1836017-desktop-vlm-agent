@@ -45,6 +45,12 @@ class Config:
     # Tier 4 reliability: per-step wall-clock timeout and stuck-step detection.
     step_timeout_seconds: float
     stuck_step_threshold: int
+    # Smart-screenshot (PR S Phase 1): downsample + JPEG-encode every
+    # screenshot before sending to Gemini, and optionally skip the
+    # planner image entirely when consecutive frames are identical.
+    vlm_image_max_dim: int
+    vlm_image_quality: int
+    vlm_skip_identical_frames: bool
 
     @classmethod
     def load(cls) -> Config:
@@ -100,11 +106,20 @@ class Config:
             stuck_step_threshold=int(
                 os.getenv("STUCK_STEP_THRESHOLD", "3")
             ),
+            vlm_image_max_dim=int(os.getenv("VLM_IMAGE_MAX_DIM", "1280")),
+            vlm_image_quality=int(os.getenv("VLM_IMAGE_QUALITY", "80")),
+            vlm_skip_identical_frames=_env_bool(
+                "VLM_SKIP_IDENTICAL_FRAMES", default=False
+            ),
         )
         if cfg.rpd_warn_threshold >= cfg.rpd_halt_threshold:
             raise ValueError(
                 f"RPD_WARN_THRESHOLD ({cfg.rpd_warn_threshold}) must be "
                 f"less than RPD_HALT_THRESHOLD ({cfg.rpd_halt_threshold})"
+            )
+        if not 1 <= cfg.vlm_image_quality <= 100:
+            raise ValueError(
+                f"VLM_IMAGE_QUALITY must be in [1, 100]; got {cfg.vlm_image_quality}"
             )
         return cfg
 

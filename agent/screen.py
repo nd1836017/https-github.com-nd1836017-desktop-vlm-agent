@@ -74,6 +74,54 @@ def image_to_png_bytes(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
+def downsample_for_vlm(
+    img: Image.Image, *, max_dim: int
+) -> Image.Image:
+    """Downsample ``img`` so its longer edge is at most ``max_dim`` pixels.
+
+    Aspect ratio is preserved. ``max_dim <= 0`` disables downsampling.
+    The returned image is always RGB (we strip any alpha so JPEG encoding
+    later doesn't choke). If the image is already small enough we still
+    convert to RGB for consistency, but skip the resize.
+
+    Why downsample at all: Gemini's vision tokenizer downscales internally
+    (the tile grid is fixed), so sending a 1920x1080 PNG burns network
+    bandwidth, encoding CPU, and request size for pixels the model will
+    throw away. Empirically a 1280px-long-edge JPEG compresses to ~50-100
+    KB versus ~2-3 MB for the raw PNG, with no visible accuracy loss for
+    button/text targets in a desktop UI.
+    """
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    if max_dim <= 0:
+        return img
+    w, h = img.size
+    long_edge = max(w, h)
+    if long_edge <= max_dim:
+        return img
+    scale = max_dim / float(long_edge)
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+
+def image_to_jpeg_bytes(
+    img: Image.Image, *, quality: int = 80, max_dim: int = 1280
+) -> bytes:
+    """Encode ``img`` as JPEG bytes after downsampling to ``max_dim``.
+
+    Used by the VLM client to ship the smallest correct payload.
+    ``quality=80`` is a UI-friendly default (button text and small icons
+    stay sharp; larger images compress to ~1/20 of their PNG size).
+    """
+    prepared = downsample_for_vlm(img, max_dim=max_dim)
+    buf = io.BytesIO()
+    # Setting optimize=True saves another ~5% but costs CPU; skip — we'd
+    # rather spend that time on the Gemini round-trip than on encoding.
+    prepared.save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
 def image_signature(img: Image.Image, downsample: int = 16) -> str:
     """Return a compact perceptual fingerprint of ``img`` as a hex string.
 

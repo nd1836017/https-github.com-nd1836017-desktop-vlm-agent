@@ -119,6 +119,9 @@ def _cfg(tmp_path, tasks_text: str, **overrides) -> Config:
         log_level="INFO",
         step_timeout_seconds=0.0,
         stuck_step_threshold=0,
+        vlm_image_max_dim=1280,
+        vlm_image_quality=80,
+        vlm_skip_identical_frames=False,
     )
     defaults.update(overrides)
     return Config(**defaults)

@@ -40,6 +40,7 @@ from .parser import (
     TypeCommand,
     WaitCommand,
 )
+from .screen import image_signature, image_to_jpeg_bytes
 
 log = logging.getLogger(__name__)
 
@@ -521,6 +522,15 @@ class GeminiClient:
         retry_max_delay_seconds: float = 300.0,
         enable_json_output: bool = True,
         rpd_guard: RpdGuard | None = None,
+        # Smart-screenshot knobs (PR S Phase 1). Default values aim for
+        # zero accuracy risk: the JPEG quality / downsample target are
+        # both well above what Gemini's vision tokenizer would otherwise
+        # discard. Identical-frame skip is opt-in (default off) so the
+        # baseline behavior is unchanged for callers that haven't read
+        # the docs.
+        image_max_dim: int = 1280,
+        image_quality: int = 80,
+        skip_identical_frames: bool = False,
     ) -> None:
         self._client = genai.Client(api_key=api_key)
         self._model_name = model_name
@@ -529,6 +539,15 @@ class GeminiClient:
         self._retry_max_delay_seconds = retry_max_delay_seconds
         self._enable_json_output = enable_json_output
         self._rpd_guard = rpd_guard or RpdGuard()
+        self._image_max_dim = image_max_dim
+        self._image_quality = image_quality
+        self._skip_identical_frames = skip_identical_frames
+        # Tracks the signature of the most recent screenshot the
+        # planner saw. When the next plan_action() screenshot hashes
+        # identically (e.g. a click that didn't visibly do anything),
+        # we replace the image with a text marker — saves an entire
+        # vision tokenization pass.
+        self._last_planner_signature: str | None = None
         self._action_config = types.GenerateContentConfig(
             system_instruction=ACTION_SYSTEM_PROMPT,
         )
@@ -580,11 +599,18 @@ class GeminiClient:
         The RPD guard is recorded inside ``_call_with_retry`` so every real
         HTTP attempt is counted — a single logical request that takes five
         retries to succeed consumes five slots of daily quota.
+
+        Any ``PIL.Image.Image`` in ``contents`` is transparently converted
+        to a downsampled JPEG ``Part`` first. This is the smart-screenshot
+        Layer 1 win: by default the SDK PNG-encodes PIL Images at full
+        resolution, which is wasteful (Gemini's vision tokenizer
+        downsamples internally anyway).
         """
+        optimized = self._optimize_contents(contents)
         return _call_with_retry(
             lambda: self._client.models.generate_content(
                 model=self._model_name,
-                contents=contents,
+                contents=optimized,
                 config=config,
             ),
             label=label,
@@ -593,6 +619,27 @@ class GeminiClient:
             max_delay_seconds=self._retry_max_delay_seconds,
             rpd_guard=self._rpd_guard,
         )
+
+    def _optimize_contents(self, contents: list) -> list:
+        """Replace every PIL ``Image`` with a downsampled JPEG ``Part``.
+
+        Non-image entries (prompt strings, ``Part`` instances the caller
+        already built) are passed through untouched.
+        """
+        out: list = []
+        for entry in contents:
+            if isinstance(entry, Image.Image):
+                jpeg = image_to_jpeg_bytes(
+                    entry,
+                    quality=self._image_quality,
+                    max_dim=self._image_max_dim,
+                )
+                out.append(
+                    types.Part.from_bytes(data=jpeg, mime_type="image/jpeg")
+                )
+            else:
+                out.append(entry)
+        return out
 
     def plan_action(
         self,
@@ -640,6 +687,43 @@ class GeminiClient:
             )
         parts.append(f"Current step: {step}")
 
+        # Smart-screenshot Layer 2: identical-frame skip. When the
+        # current screenshot fingerprints identically to the one we sent
+        # the planner on the previous step (e.g. a click that didn't
+        # visibly do anything), we drop the image from the request and
+        # tell the planner so in plain text. The planner already sees
+        # the recent step history, so it has enough context to decide
+        # what to do next without paying for a fresh vision pass.
+        #
+        # Only applies to plan_action (not verify / disambiguate /
+        # refine, which are checking specific visual states). Opt-in
+        # via VLM_SKIP_IDENTICAL_FRAMES; off by default.
+        send_screenshot = True
+        try:
+            current_signature = image_signature(screenshot)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("image_signature failed; sending screenshot: %s", exc)
+            current_signature = None
+        if (
+            self._skip_identical_frames
+            and current_signature is not None
+            and self._last_planner_signature == current_signature
+        ):
+            send_screenshot = False
+            parts.append(
+                "[The screen looks IDENTICAL to the screenshot you saw on the "
+                "previous step. The last action did not visibly change the UI. "
+                "Pick a DIFFERENT action this time.]"
+            )
+            log.info(
+                "plan_action: skipping screenshot — identical signature %s",
+                current_signature[:8],
+            )
+        # Update the tracker BEFORE the call so consecutive identical
+        # frames keep skipping; reset on any change.
+        if current_signature is not None:
+            self._last_planner_signature = current_signature
+
         # Decode any feed-buffer bytes into PIL Images alongside the live
         # screenshot. Bad bytes are skipped with a warning so a single
         # corrupt capture doesn't poison the whole call.
@@ -654,6 +738,10 @@ class GeminiClient:
                     exc,
                 )
 
+        # Build the contents list, dropping the screenshot when Layer 2
+        # decided to skip it.
+        screenshot_parts: list = [screenshot] if send_screenshot else []
+
         if self._enable_json_output:
             parts.append(
                 "Respond with a single JSON object following the schema."
@@ -661,7 +749,7 @@ class GeminiClient:
             prompt = "\n\n".join(parts)
             response = self._generate(
                 "plan_action_json",
-                [prompt, screenshot, *attached_images],
+                [prompt, *screenshot_parts, *attached_images],
                 self._action_config_json,
             )
             text = (response.text or "").strip()
@@ -699,7 +787,7 @@ class GeminiClient:
         prompt = "\n\n".join(parts)
         response = self._generate(
             "plan_action",
-            [prompt, screenshot, *attached_images],
+            [prompt, *screenshot_parts, *attached_images],
             self._action_config,
         )
         text = (response.text or "").strip()

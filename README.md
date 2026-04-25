@@ -214,6 +214,9 @@ Common env vars (full list in [`.env.example`](./.env.example)):
 | `RPD_LIMIT` | `500` | Gemini requests/day before HALT. Matches the 3.1-flash-lite-preview free tier. |
 | `RPD_WARN_THRESHOLD` / `RPD_HALT_THRESHOLD` | `0.75` / `0.95` | WARN and HALT fractions of `RPD_LIMIT`. |
 | `LOG_REDACT_TYPE` | `true` | Log `TYPE <REDACTED, N chars>` instead of literal text. |
+| `VLM_IMAGE_MAX_DIM` | `1280` | Long-edge cap (px) applied before sending each screenshot to Gemini. `0` disables. |
+| `VLM_IMAGE_QUALITY` | `80` | JPEG quality (1–100) used for VLM screenshots. Defaults are zero-accuracy-risk. |
+| `VLM_SKIP_IDENTICAL_FRAMES` | `false` | When on, the planner gets a "screen unchanged" text marker instead of a fresh image when consecutive frames hash identically. |
 | `LOG_LEVEL` | `INFO` | Python logging level. |
 
 ---
@@ -348,6 +351,16 @@ Two safeguards stop a single bad step from burning the whole replan budget (or t
 - **Stuck-step detection** — `STUCK_STEP_THRESHOLD` (default `3`). After each failed attempt the agent fingerprints the post-action screenshot. If the last `N` attempts produced **identical** screen state, the step bails early instead of replanning into the same dead-end. Set to `0` to disable.
 
 Both safeguards halt cleanly between steps with the checkpoint intact — fix the underlying problem (a frozen modal, an offline page) and `python -m agent --resume` continues from where it stopped.
+
+### Smart screenshots (token / bandwidth saver)
+
+Every screenshot we send to Gemini goes through a tiny optimization pipeline first. The defaults are zero-accuracy-risk and on by default — they just stop wasting bytes the model would discard anyway.
+
+- **Downsample to `VLM_IMAGE_MAX_DIM`** (default `1280` px on the long edge). Gemini's vision tokenizer downscales internally — sending raw 4K screenshots burns request size for pixels that get thrown away.
+- **JPEG-encode at `VLM_IMAGE_QUALITY`** (default `80`). UI text and icons stay sharp; the wire payload shrinks ~10–30× versus the equivalent PNG.
+- **Identical-frame skip (opt-in)** — set `VLM_SKIP_IDENTICAL_FRAMES=true` to drop the screenshot from `plan_action` calls when the new frame fingerprints identically to the previous one (i.e. the last action did nothing visible). The planner gets a "screen unchanged" marker instead, and is asked to pick a *different* action. Verify / disambiguate / refine still always get a fresh image.
+
+If you ever need to send the original full-resolution PNGs again (debugging an accuracy regression, comparing model behavior), set `VLM_IMAGE_MAX_DIM=0` and `VLM_IMAGE_QUALITY=100` — the encoded JPEG is then effectively lossless.
 
 ---
 

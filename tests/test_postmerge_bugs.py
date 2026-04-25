@@ -422,3 +422,66 @@ def test_call_with_retry_still_raises_on_400_with_string_status():
 def test_retryable_status_set_includes_expected_codes():
     """Sanity check: the retryable set didn't accidentally narrow."""
     assert {429, 500, 502, 503, 504} == _RETRYABLE_STATUS
+
+
+# ---------------------------------------------------------------------------
+# Bug #3 (PR S round 2): parse-failure path skipped save_plan / save_verdict.
+#
+# Every other return path from _attempt_step writes both ``save_plan`` and
+# ``save_verdict`` so the artifact bundle is symmetric. The parse-failure
+# fall-through used to skip both, leaving a ``before.png`` with no plan or
+# verdict — confusing when triaging a stuck run. The fix synthesizes
+# ``<parse-failed>`` placeholders so the bundle stays consistent.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_failure_writes_synthetic_plan_and_verdict():
+    from unittest.mock import MagicMock, patch
+
+    from agent.agent import _attempt_step
+    from agent.artifacts import ArtifactWriter
+    from agent.screen import ScreenGeometry
+
+    writer = MagicMock(spec=ArtifactWriter)
+    fake_image = MagicMock()
+    fake_image.size = (1920, 1080)
+    geometry = ScreenGeometry(width=1920, height=1080)
+    vlm = MagicMock()
+    vlm.plan_action.return_value = ("garbage VLM output", None)
+
+    with (
+        patch("agent.agent.capture_screenshot", return_value=fake_image),
+        patch("agent.agent.parse_command", return_value=None),
+    ):
+        verdict, action_text = _attempt_step(
+            step="step that will never parse",
+            vlm=vlm,
+            geometry=geometry,
+            animation_buffer=0.0,
+            max_parse_retries=1,
+            history_summary="",
+            previous_failure="",
+            enable_two_stage_click=False,
+            two_stage_crop_size_px=300,
+            max_click_candidates=5,
+            artifact_writer=writer,
+            workspace=None,
+            step_idx=42,
+            extra_images=[],
+        )
+
+    assert verdict.passed is False
+    assert "Parse failure" in verdict.reason
+    assert action_text == "<parse-failed>"
+
+    # The whole point of this regression test: bundle is symmetric.
+    assert writer.save_plan.called, "save_plan must run on parse failure"
+    assert writer.save_verdict.called, "save_verdict must run on parse failure"
+
+    plan_args, _ = writer.save_plan.call_args
+    verdict_args, _ = writer.save_verdict.call_args
+    assert plan_args[0] == 42
+    assert verdict_args[0] == 42
+    # save_verdict(step_idx, passed, reason)
+    assert verdict_args[1] is False
+    assert "Parse failure" in verdict_args[2]

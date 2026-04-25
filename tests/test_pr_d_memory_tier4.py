@@ -187,6 +187,39 @@ def test_extract_text_parser_none():
     assert result.value == ""
 
 
+def test_extract_text_parser_none_with_punctuation():
+    """Regression: a slightly verbose model emits ``NONE.`` or ``NONE: ...``
+    when it can't find the value. The previous parser only matched bare
+    ``NONE`` and ``NONE\\n…``, so these forms were misparsed as a
+    successful extraction of the literal string ``NONE.``.
+    """
+    for variant in (
+        "NONE.",
+        "NONE: value not found",
+        "NONE — couldn't find it",
+        "NONE\nreason: blocked by modal",
+        "  NONE  ",
+        "VALUE: NONE",
+        "VALUE: NONE.",
+    ):
+        result = GeminiClient._parse_extract_text(variant)
+        assert result.found is False, f"variant {variant!r} should be NONE"
+        assert result.value == ""
+
+
+def test_extract_text_parser_does_not_swallow_nonexistent_value():
+    """The fix uses a word boundary so ``NONEXISTENT`` and other words
+    that merely *start* with ``NONE`` are still extractable.
+    """
+    result = GeminiClient._parse_extract_text("NONEXISTENT-FILE")
+    assert result.found is True
+    assert result.value == "NONEXISTENT-FILE"
+
+    result2 = GeminiClient._parse_extract_text("VALUE: NONESUCH-12345")
+    assert result2.found is True
+    assert result2.value == "NONESUCH-12345"
+
+
 def test_extract_text_parser_freeform_takes_first_line():
     result = GeminiClient._parse_extract_text("ND-99999\nextra junk")
     assert result.found is True

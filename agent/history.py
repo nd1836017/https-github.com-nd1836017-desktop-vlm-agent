@@ -21,6 +21,8 @@ from .parser import (
     MoveToCommand,
     PauseCommand,
     PressCommand,
+    RecallCommand,
+    RememberCommand,
     RightClickCommand,
     ScrollCommand,
     TypeCommand,
@@ -77,6 +79,21 @@ def render_command(cmd: Command, *, redact_type: bool = False) -> str:
         if cmd.filename:
             return f"CAPTURE_FOR_AI [{cmd.filename}]"
         return "CAPTURE_FOR_AI"
+    if isinstance(cmd, RememberCommand):
+        # Two forms: REMEMBER [name = literal] (literal stored as-is)
+        # and REMEMBER [name] (extracted from the screen via VLM).
+        # Don't render the literal value if redact_type is set — it
+        # may contain sensitive data the user pasted.
+        if not cmd.from_screen:
+            if redact_type:
+                return (
+                    f"REMEMBER [{cmd.name} = "
+                    f"<REDACTED, {len(cmd.literal_value)} chars>]"
+                )
+            return f"REMEMBER [{cmd.name} = {cmd.literal_value}]"
+        return f"REMEMBER [{cmd.name}]"
+    if isinstance(cmd, RecallCommand):
+        return f"RECALL [{cmd.name}]"
     return str(cmd)
 
 

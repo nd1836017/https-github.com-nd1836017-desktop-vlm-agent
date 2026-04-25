@@ -4,7 +4,13 @@ from __future__ import annotations
 import pytest
 
 from agent.history import History, render_command
-from agent.parser import ClickCommand, PressCommand, TypeCommand
+from agent.parser import (
+    ClickCommand,
+    PressCommand,
+    RecallCommand,
+    RememberCommand,
+    TypeCommand,
+)
 
 
 def test_render_command_forms():
@@ -65,3 +71,44 @@ def test_history_truncates_long_reasons():
     # Reason is truncated to 120 chars in the rendered summary.
     assert "x" * 120 in summary
     assert "x" * 200 not in summary
+
+
+# --- REMEMBER / RECALL rendering (regression: dataclass repr leak) ---
+
+
+def test_render_command_remember_from_screen():
+    cmd = RememberCommand(name="order_id", from_screen=True)
+    assert render_command(cmd) == "REMEMBER [order_id]"
+
+
+def test_render_command_remember_literal():
+    cmd = RememberCommand(name="user", literal_value="alice")
+    assert render_command(cmd) == "REMEMBER [user = alice]"
+
+
+def test_render_command_remember_literal_redacted():
+    cmd = RememberCommand(name="password", literal_value="hunter2")
+    rendered = render_command(cmd, redact_type=True)
+    # Don't leak the literal; do report the length so postmortems show
+    # the field was set.
+    assert "hunter2" not in rendered
+    assert rendered == "REMEMBER [password = <REDACTED, 7 chars>]"
+
+
+def test_render_command_recall():
+    cmd = RecallCommand(name="order_id")
+    assert render_command(cmd) == "RECALL [order_id]"
+
+
+def test_render_command_remember_does_not_fall_through_to_repr():
+    """Regression: history.render_command used to lack RememberCommand /
+    RecallCommand handlers, so the fallback ``str(cmd)`` rendered the
+    raw dataclass repr (``RememberCommand(kind='REMEMBER', name='x', ...)``)
+    into the planner prompt. That's verbose, leaks internal field names,
+    and breaks the canonical-form contract every other command obeys.
+    """
+    cmd = RememberCommand(name="x", from_screen=True)
+    rendered = render_command(cmd)
+    assert "RememberCommand(" not in rendered
+    assert "kind=" not in rendered
+    assert rendered.startswith("REMEMBER ")

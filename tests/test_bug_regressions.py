@@ -256,3 +256,43 @@ def test_badge_stays_full_height_regardless_of_top(top):
     badge_bottom = badge_top + 34
     assert badge_bottom > badge_top
     assert badge_bottom - badge_top == 34
+
+
+# ---------------------------------------------------------------------------
+# Bug (PR #14): main() must catch ValueError, not just RuntimeError, so a
+# bad FILE_MODE / RPD threshold prints "[config error] ..." instead of
+# crashing with a raw Python traceback.
+# ---------------------------------------------------------------------------
+def test_main_handles_invalid_file_mode_cleanly(monkeypatch, capsys, tmp_path):
+    from agent.__main__ import main
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    monkeypatch.setenv("FILE_MODE", "bogus_mode")
+    # Need a tasks file or argparse will reject; main() should fail at
+    # Config.load() before reaching any task work.
+    tasks_file = tmp_path / "tasks.txt"
+    tasks_file.write_text("noop\n", encoding="utf-8")
+    monkeypatch.setenv("TASKS_FILE", str(tasks_file))
+
+    exit_code = main([])
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "[config error]" in captured.err
+    assert "FILE_MODE" in captured.err
+
+
+def test_main_handles_invalid_rpd_thresholds_cleanly(monkeypatch, capsys, tmp_path):
+    from agent.__main__ import main
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    monkeypatch.setenv("RPD_WARN_THRESHOLD", "0.99")
+    monkeypatch.setenv("RPD_HALT_THRESHOLD", "0.50")
+    tasks_file = tmp_path / "tasks.txt"
+    tasks_file.write_text("noop\n", encoding="utf-8")
+    monkeypatch.setenv("TASKS_FILE", str(tasks_file))
+
+    exit_code = main([])
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "[config error]" in captured.err
+    assert "must be less than" in captured.err

@@ -17,6 +17,19 @@ Supported commands:
                                   to replan when no match is found.
     PAUSE [REASON]              — halt and wait for a human to resolve REASON
                                   (e.g. a 2FA prompt, captcha) before resuming.
+    DOWNLOAD [URL]              — fetch URL via HTTP and save to the run
+                                  workspace; filename derived from the URL.
+    DOWNLOAD [URL, FILENAME]    — same, with explicit filename. Inside a
+                                  FOR_EACH_ROW block FILENAME gets a
+                                  ``(rowN)`` suffix to avoid collisions.
+    ATTACH_FILE [FILENAME]      — type the absolute path of FILENAME into
+                                  the OS file-picker dialog (Ctrl+L on
+                                  Windows file dialogs) and submit.
+    CAPTURE_FOR_AI              — capture the current screenshot and feed
+                                  it as an extra image to the next plan
+                                  call (no disk write).
+    CAPTURE_FOR_AI [FILENAME]   — same, but also reads bytes from
+                                  FILENAME (useful for non-screen content).
 
 The parser is defensive: it tolerates surrounding conversational text,
 case variations, and a few common bracket omissions. It never raises on
@@ -44,6 +57,9 @@ CommandType = Literal[
     "WAIT",
     "CLICK_TEXT",
     "PAUSE",
+    "DOWNLOAD",
+    "ATTACH_FILE",
+    "CAPTURE_FOR_AI",
 ]
 
 
@@ -121,6 +137,42 @@ class PauseCommand:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class DownloadCommand:
+    """Download URL via HTTP into the run workspace.
+
+    ``filename`` is optional — when missing, derived from the URL path.
+    """
+
+    kind: CommandType = "DOWNLOAD"
+    url: str = ""
+    filename: str = ""
+
+
+@dataclass(frozen=True)
+class AttachFileCommand:
+    """Type a file path into a native OS file-picker dialog and submit.
+
+    ``filename`` is matched against files in the workspace; if not found,
+    treated as an absolute / CWD-relative path.
+    """
+
+    kind: CommandType = "ATTACH_FILE"
+    filename: str = ""
+
+
+@dataclass(frozen=True)
+class CaptureForAiCommand:
+    """Feed an image (current screen or a file) to the next plan call.
+
+    ``filename`` is optional — when missing, the executor uses the next
+    fresh screenshot.
+    """
+
+    kind: CommandType = "CAPTURE_FOR_AI"
+    filename: str = ""
+
+
 Command = (
     ClickCommand
     | DoubleClickCommand
@@ -133,6 +185,9 @@ Command = (
     | WaitCommand
     | ClickTextCommand
     | PauseCommand
+    | DownloadCommand
+    | AttachFileCommand
+    | CaptureForAiCommand
 )
 
 
@@ -178,6 +233,27 @@ _PAUSE_RE = re.compile(
     r"PAUSE\s*\[\s*(.*?)\s*\]",
     re.IGNORECASE | re.DOTALL,
 )
+# DOWNLOAD accepts [URL] (filename auto-derived) or [URL, FILENAME].
+# The URL/FILENAME delimiter is comma + AT LEAST ONE WHITESPACE so that URLs
+# containing bare commas (e.g. ``?ids=1,2,3`` query params) aren't silently
+# truncated. ``DOWNLOAD [https://x/y?a=1,2,3]`` keeps the whole URL intact;
+# ``DOWNLOAD [https://x/y, out.pdf]`` splits at the comma+space. Filenames
+# may not contain ``,`` or ``]`` themselves.
+_DOWNLOAD_RE = re.compile(
+    r"DOWNLOAD\s*\[\s*(.+?)(?:,\s+([^\],]+?))?\s*\]",
+    re.IGNORECASE,
+)
+_ATTACH_FILE_RE = re.compile(
+    r"ATTACH[_\s]?FILE\s*\[\s*(.+?)\s*\]",
+    re.IGNORECASE,
+)
+# CAPTURE_FOR_AI ALWAYS requires brackets so the parser doesn't accidentally
+# match prose like "...to capture for AI analysis, click here". The contents
+# may be empty (``CAPTURE_FOR_AI []`` = grab the current screen).
+_CAPTURE_FOR_AI_RE = re.compile(
+    r"CAPTURE[_\s]?FOR[_\s]?AI\s*\[\s*(.*?)\s*\]",
+    re.IGNORECASE,
+)
 
 
 # --- Lenient fallbacks (missing brackets, common prose forms). ----------------
@@ -210,6 +286,27 @@ def parse_command(response: str) -> Command | None:
             reason = m.group(1).strip()
             if reason:
                 return PauseCommand(reason=reason)
+
+        # File primitives. Tried before CLICK_TEXT because their bracket
+        # args can contain spaces / dots that would otherwise read as a
+        # CLICK_TEXT label fallback.
+        m = _DOWNLOAD_RE.search(response)
+        if m:
+            url = m.group(1).strip()
+            filename = (m.group(2) or "").strip()
+            if url:
+                return DownloadCommand(url=url, filename=filename)
+
+        m = _ATTACH_FILE_RE.search(response)
+        if m:
+            fname = m.group(1).strip()
+            if fname:
+                return AttachFileCommand(filename=fname)
+
+        m = _CAPTURE_FOR_AI_RE.search(response)
+        if m:
+            fname = (m.group(1) or "").strip()
+            return CaptureForAiCommand(filename=fname)
 
         # CLICK_TEXT must be tried before CLICK so the CLICK regex doesn't
         # mistakenly match prose inside a CLICK_TEXT label.

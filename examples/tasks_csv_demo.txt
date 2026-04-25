@@ -1,0 +1,26 @@
+# CSV-loop demo: this tasks file fills out the same form once per row of
+# data_demo.csv. Copy these two files to the project root (or pass with
+# TASKS_FILE / --csv) and run `python -m agent`.
+
+# Open the form once.
+Open Chrome
+Click the address bar
+Type "https://example.com/contact" and press Enter
+
+FOR_EACH_ROW [data_demo.csv]
+    # Each iteration becomes its own logical step in the agent's plan.
+    Click the "First name" field
+    Type "{{row.first_name}}"
+    Click the "Last name" field
+    Type "{{row.last_name}}"
+    Click the "Email" field
+    Type "{{row.email}}"
+    Click the "Message" field
+    Type "{{row.message|Hello!}}"
+    Click the Submit button
+    Wait for the success banner
+END_FOR_EACH_ROW
+
+# Sign out once at the end.
+Click the user avatar in the top right
+Click "Sign out"

@@ -8,6 +8,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from .files import FileMode
+
 
 @dataclass(frozen=True)
 class Config:
@@ -37,6 +39,8 @@ class Config:
     rpd_limit: int
     rpd_warn_threshold: float
     rpd_halt_threshold: float
+    file_mode: FileMode | None
+    workdir: Path | None
     log_level: str
 
     @classmethod
@@ -84,6 +88,8 @@ class Config:
             rpd_limit=int(os.getenv("RPD_LIMIT", "500")),
             rpd_warn_threshold=float(os.getenv("RPD_WARN_THRESHOLD", "0.75")),
             rpd_halt_threshold=float(os.getenv("RPD_HALT_THRESHOLD", "0.95")),
+            file_mode=_env_file_mode(),
+            workdir=_env_workdir(),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         )
         if cfg.rpd_warn_threshold >= cfg.rpd_halt_threshold:
@@ -99,6 +105,27 @@ def _env_bool(name: str, *, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_file_mode() -> FileMode | None:
+    """Parse ``FILE_MODE`` (case-insensitive). ``None`` means "ask interactively"."""
+    raw = os.getenv("FILE_MODE", "").strip().lower()
+    if not raw:
+        return None
+    try:
+        return FileMode(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"FILE_MODE={raw!r} is not one of "
+            f"{[m.value for m in FileMode]}"
+        ) from exc
+
+
+def _env_workdir() -> Path | None:
+    raw = os.getenv("WORKDIR", "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser()
 
 
 def configure_logging(level: str) -> None:

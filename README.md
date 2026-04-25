@@ -153,6 +153,7 @@ python -m agent --reset
 
 - **Visual-Action Loop** — screenshot → VLM plan → parse → `pyautogui` execute → screenshot → VLM verify.
 - **Rich command set** — `CLICK` / `DOUBLE_CLICK` / `RIGHT_CLICK` / `MOVE_TO`, `CLICK_TEXT` (OCR-anchored), `PRESS`, `TYPE` (clipboard-based for Unicode), `SCROLL`, `DRAG`, `WAIT`, `PAUSE`.
+- **CSV-driven loops** — `FOR_EACH_ROW [data.csv]` … `END_FOR_EACH_ROW` repeats a block per row with `{{row.<field>}}` substitution. See [CSV-driven loops](#csv-driven-loops).
 - **Two-stage CLICK** — after a coarse coordinate, the agent crops around the target and asks the VLM to refine + disambiguate. Cuts misclicks dramatically.
 - **Normalized grid** — VLM emits coordinates on a 0–1000 grid; agent auto-detects native resolution and maps to pixels.
 - **Short-term memory + replan** — rolling window of recent (step, action, verdict) rows fed back into the planner; on verifier FAIL the agent replans up to a configurable budget before halting.
@@ -236,6 +237,42 @@ Type "https://example.com" and press Enter
 
 Instructions are free-form English. The agent is not parsing them directly — it feeds them to Gemini as goals, one at a time, and Gemini emits concrete commands.
 
+### CSV-driven loops
+
+For repetitive work — filling a form once per row, sending bulk emails, etc. — wrap a block of steps in `FOR_EACH_ROW [data.csv]` … `END_FOR_EACH_ROW` and use `{{row.<field>}}` placeholders to pull values from the CSV header:
+
+```
+# open the form once
+Open Chrome
+Click the address bar
+Type "https://example.com/contact" and press Enter
+
+FOR_EACH_ROW [data.csv]
+    Click the "First name" field
+    Type "{{row.first_name}}"
+    Click the "Email" field
+    Type "{{row.email}}"
+    Click the "Message" field
+    Type "{{row.message|Hello!}}"   # default value if cell is empty
+    Click Submit
+END_FOR_EACH_ROW
+```
+
+With a CSV like:
+
+```
+first_name,email,message
+Alice,alice@example.com,Following up on our chat
+Bob,bob@example.com,
+```
+
+the block above runs the inner steps twice — once with Alice's row, once with Bob's. Empty cells fall back to the `|default` value (`Hello!` here for Bob's missing message).
+
+- Field names match the CSV header **exactly** (case-sensitive).
+- The CSV path is resolved relative to the tasks file (or override at runtime with `python -m agent --csv real_data.csv`).
+- Nesting `FOR_EACH_ROW` is not supported.
+- A working example is in [`examples/tasks_csv_demo.txt`](./examples/tasks_csv_demo.txt) + [`examples/data_demo.csv`](./examples/data_demo.csv).
+
 ---
 
 ## Run
@@ -244,6 +281,7 @@ Instructions are free-form English. The agent is not parsing them directly — i
 python -m agent                # run from tasks.txt (fresh or continued from checkpoint)
 python -m agent --resume       # force resume from last verified step
 python -m agent --reset        # delete checkpoint and start fresh
+python -m agent --csv data.csv # override the FOR_EACH_ROW data file at runtime
 python -m agent --two-stage-click     # force two-stage CLICK on (overrides .env)
 python -m agent --no-two-stage-click  # force two-stage CLICK off (faster, less safe)
 ```
@@ -271,8 +309,31 @@ The VLM is instructed to respond with exactly one of the following:
 | `DRAG [X1,Y1,X2,Y2]` | `DRAG [100,200,400,500]` | Click-and-drag from (X1,Y1) to (X2,Y2) on the 0–1000 grid. |
 | `WAIT [SECONDS]` | `WAIT [3]` | Pause execution for N seconds (no VLM call). |
 | `PAUSE [reason]` | `PAUSE [2FA prompt needs manual approval]` | Emitted by the VLM when it sees a 2FA / CAPTCHA / "Verify it's you" screen. Agent halts cleanly with zero side-effects and waits for <kbd>Enter</kbd>. |
+| `DOWNLOAD [url, filename]` | `DOWNLOAD [https://example.com/inv.pdf, inv.pdf]` | Fetches a URL via HTTPS and stores it in the run's file workspace. `filename` is optional; when missing it's derived from the URL. The URL/FILENAME delimiter is **comma followed by at least one space** (so URLs like `?ids=1,2,3` aren't truncated). Honors the run's file mode (temp/save/feed). |
+| `ATTACH_FILE [filename]` | `ATTACH_FILE [inv.pdf]` | Pastes a path into the focused OS file-picker (`Ctrl+L` → paste → Enter) via the system clipboard, so non-ASCII filenames work. The agent must already have clicked the dialog's Browse button. `filename` is resolved against the workspace first, then the disk. |
+| `CAPTURE_FOR_AI [filename]` | `CAPTURE_FOR_AI []` | Buffers an image for the next plan call. **Brackets are required** (empty `[]` = grab the current screen; otherwise reads `filename` from the workspace or disk). Useful for "look at this PDF and tell me the invoice number". |
 
 The parser is lenient — it recovers from conversational wrapping, missing brackets, or parentheses in place of brackets.
+
+### File-handling modes
+
+When the tasks file uses `DOWNLOAD`, `ATTACH_FILE`, or `CAPTURE_FOR_AI`, the agent asks at run start how to persist captured files:
+
+```
+File handling for this run:
+  [t] temp  — auto-cleanup on success, kept on failure for debugging
+  [s] save  — persist all downloads to a directory
+  [f] feed  — never write to disk, only show to the VLM
+Choose [t/s/f]:
+```
+
+- **temp** *(default)* — files go to an OS temp dir, wiped automatically when the run succeeds, preserved on failure so you can inspect what the agent grabbed.
+- **save** — files persist to `--workdir` (or `WORKDIR` from `.env`, defaulting to `./agent_files`).
+- **feed** — files never touch disk; bytes are streamed straight into the next VLM call.
+
+Tasks files that don't use any file primitives skip this prompt entirely. For unattended runs (`.exe`, scheduled jobs), set `FILE_MODE` / `WORKDIR` in `.env` or pass `--mode` / `--workdir` on the CLI.
+
+Inside `FOR_EACH_ROW`, file names are suffixed with `(rowN)` to prevent collisions: `invoice.pdf` on row 50 becomes `invoice(row50).pdf`.
 
 ---
 
@@ -331,7 +392,11 @@ desktop-vlm-agent/
 │   ├── parser.py        # command parser (regex + JSON, lenient)
 │   ├── screen.py        # screenshot + 0-1000 ↔ pixel scaling + overlays
 │   ├── state.py         # checkpoint file (atomic writes)
+│   ├── tasks_loader.py  # tasks.txt parser + FOR_EACH_ROW + CSV templating
 │   └── vlm.py           # Gemini client (plan + verify + retry)
+├── examples/
+│   ├── tasks_csv_demo.txt
+│   └── data_demo.csv
 ├── scripts/
 │   └── launch-chrome.sh # persistent-profile Chrome launcher (Linux)
 ├── tests/               # pytest unit tests

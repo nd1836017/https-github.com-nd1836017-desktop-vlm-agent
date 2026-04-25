@@ -235,3 +235,110 @@ def test_click_text_is_not_eaten_by_click_regex():
 def test_click_text_empty_label_falls_through():
     # An empty label isn't useful — parser should reject and return None.
     assert parse_command("CLICK_TEXT []") is None
+
+
+# ----------------------------------------------------- file-handling primitives
+
+
+def test_parse_download_with_filename():
+    from agent.parser import DownloadCommand
+
+    cmd = parse_command("DOWNLOAD [https://example.com/foo.pdf, foo.pdf]")
+    assert isinstance(cmd, DownloadCommand)
+    assert cmd.url == "https://example.com/foo.pdf"
+    assert cmd.filename == "foo.pdf"
+
+
+def test_parse_download_url_only():
+    from agent.parser import DownloadCommand
+
+    cmd = parse_command("DOWNLOAD [https://example.com/foo.pdf]")
+    assert isinstance(cmd, DownloadCommand)
+    assert cmd.url == "https://example.com/foo.pdf"
+    assert cmd.filename == ""
+
+
+def test_parse_download_preserves_commas_in_url():
+    """Bare commas in URLs (e.g. ``?ids=1,2,3``) must NOT be treated as the
+    URL/FILENAME delimiter. The delimiter is comma + at least one whitespace.
+
+    Regression test: previously _DOWNLOAD_RE used ``[^,\\]\\n]+?`` for the URL
+    capture group, which silently truncated any URL containing a comma.
+    """
+    from agent.parser import DownloadCommand
+
+    cmd = parse_command("DOWNLOAD [https://example.com/file?ids=1,2,3]")
+    assert isinstance(cmd, DownloadCommand)
+    assert cmd.url == "https://example.com/file?ids=1,2,3"
+    assert cmd.filename == ""
+
+
+def test_parse_download_url_with_commas_plus_filename():
+    """URL with commas + comma-space-delimited filename still splits correctly."""
+    from agent.parser import DownloadCommand
+
+    cmd = parse_command(
+        "DOWNLOAD [https://example.com/file?a=1,2&b=3, output.pdf]"
+    )
+    assert isinstance(cmd, DownloadCommand)
+    assert cmd.url == "https://example.com/file?a=1,2&b=3"
+    assert cmd.filename == "output.pdf"
+
+
+def test_parse_download_no_space_after_comma_treats_as_one_url():
+    """``DOWNLOAD [url,name]`` (no space after comma) is now treated as a
+    single URL — the delimiter requires whitespace. This avoids silently
+    misparsing URLs that legitimately contain commas without spaces.
+    """
+    from agent.parser import DownloadCommand
+
+    cmd = parse_command("DOWNLOAD [https://example.com/foo.pdf,bar.pdf]")
+    assert isinstance(cmd, DownloadCommand)
+    assert cmd.url == "https://example.com/foo.pdf,bar.pdf"
+    assert cmd.filename == ""
+
+
+def test_parse_attach_file():
+    from agent.parser import AttachFileCommand
+
+    cmd = parse_command("ATTACH_FILE [invoice.pdf]")
+    assert isinstance(cmd, AttachFileCommand)
+    assert cmd.filename == "invoice.pdf"
+
+
+def test_parse_attach_file_with_space_alias():
+    from agent.parser import AttachFileCommand
+
+    # Planner sometimes drops the underscore.
+    cmd = parse_command("ATTACH FILE [resume.docx]")
+    assert isinstance(cmd, AttachFileCommand)
+    assert cmd.filename == "resume.docx"
+
+
+def test_parse_capture_for_ai_empty_brackets():
+    from agent.parser import CaptureForAiCommand
+
+    cmd = parse_command("CAPTURE_FOR_AI []")
+    assert isinstance(cmd, CaptureForAiCommand)
+    assert cmd.filename == ""
+
+
+def test_parse_capture_for_ai_requires_brackets():
+    # Bare CAPTURE_FOR_AI without brackets MUST NOT match — otherwise
+    # prose like "to capture for AI analysis, CLICK [500,300]" would
+    # silently win and shadow the real CLICK command.
+    cmd = parse_command(
+        "Going to CLICK [500,300] so we can capture for AI later."
+    )
+    from agent.parser import ClickCommand
+
+    assert isinstance(cmd, ClickCommand)
+    assert (cmd.x, cmd.y) == (500, 300)
+
+
+def test_parse_capture_for_ai_with_filename():
+    from agent.parser import CaptureForAiCommand
+
+    cmd = parse_command("CAPTURE_FOR_AI [snapshot.png]")
+    assert isinstance(cmd, CaptureForAiCommand)
+    assert cmd.filename == "snapshot.png"

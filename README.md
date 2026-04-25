@@ -1,22 +1,280 @@
 # Desktop VLM Agent
 
-A Python desktop automation agent that uses a **Gemini Flash** VLM as its "brain" to interact with the OS. It reads step-by-step natural-language instructions from `tasks.txt`, captures screenshots, asks the VLM what to do, parses a command from the response, executes it with `pyautogui`, and verifies the outcome with a second VLM call.
+A Python desktop automation agent that uses **Google Gemini** (a Vision-Language Model) as its "brain" to drive the OS. It reads plain-English instructions from `tasks.txt`, takes a screenshot, asks Gemini what to do, executes the action with `pyautogui`, and verifies the result with a second Gemini call.
+
+> **Quick start:** jump to [Quick start (Windows)](#quick-start-windows) if you just want to run it. No Python experience required.
+
+## Table of contents
+
+- [Quick start (Windows)](#quick-start-windows)
+- [Troubleshooting](#troubleshooting)
+- [Features](#features)
+- [Developer setup (Linux / macOS)](#developer-setup-linux--macos)
+- [Configure](#configure)
+- [Write a task file](#write-a-task-file)
+- [Run](#run)
+- [Command reference](#command-reference)
+- [Architecture](#architecture)
+- [Safety notes](#safety-notes)
+- [Project layout](#project-layout)
+
+---
+
+## Quick start (Windows)
+
+Takes ~10 minutes.
+
+### 1. Install Python 3.10+
+
+1. Go to https://www.python.org/downloads/.
+2. Click the big yellow **Download Python 3.x** button.
+3. Run the installer.
+4. **Important:** on the first screen, tick **"Add python.exe to PATH"**. Then click **Install Now**.
+
+Verify (open **Command Prompt**: <kbd>Win</kbd> → type `cmd` → Enter):
+
+```cmd
+python --version
+```
+
+You should see `Python 3.10.x` or newer. If it says *"not recognized"*, re-run the installer and tick the PATH box.
+
+### 2. Install Git (or skip and download the ZIP)
+
+Install from https://git-scm.com/download/win (defaults through every screen are fine), then **open a new Command Prompt** so PATH updates.
+
+Or — if you'd rather not install Git — just download the repo as a ZIP:
+1. Open https://github.com/nd1836017/https-github.com-nd1836017-desktop-vlm-agent in your browser.
+2. Click green **Code** → **Download ZIP**.
+3. Extract it to `C:\Users\<you>\Documents\` and rename the folder to `desktop-vlm-agent`.
+
+### 3. Get a free Gemini API key
+
+1. Go to https://aistudio.google.com/app/apikey.
+2. Sign in with Google.
+3. Click **Create API key** → **Create API key in new project**.
+4. Copy the key (looks like `AIzaSy...`). You'll paste it in step 5.
+
+Free tier allows up to 500 requests/day on `gemini-3.1-flash-lite-preview` — plenty for several long tasks a day.
+
+### 4. Clone the repo
+
+```cmd
+cd %USERPROFILE%\Documents
+git clone https://github.com/nd1836017/https-github.com-nd1836017-desktop-vlm-agent.git desktop-vlm-agent
+cd desktop-vlm-agent
+```
+
+(Skip the `git clone` line if you downloaded the ZIP.)
+
+### 5. Create a virtual environment and install dependencies
+
+```cmd
+python -m venv .venv
+.venv\Scripts\activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+The last line will download ~100 MB and takes 1–2 minutes. You'll know the venv is active when your prompt starts with `(.venv)`.
+
+> **Remember:** every time you reopen Command Prompt, `cd` into the project folder and run `.venv\Scripts\activate` again.
+
+### 6. Create your `.env` file
+
+```cmd
+copy .env.example .env
+notepad .env
+```
+
+In the Notepad window that opens, replace `your_api_key_here` on the `GEMINI_API_KEY=` line with the key from step 3. Save (<kbd>Ctrl+S</kbd>) and close.
+
+### 7. Write a task file
+
+```cmd
+notepad tasks.txt
+```
+
+Start simple:
+
+```
+Press the Windows key to open the Start menu
+Type "notepad" to search for Notepad
+Press Enter to open Notepad
+Type "Hello from the VLM agent"
+```
+
+Save and close.
+
+### 8. Run it
+
+```cmd
+python -m agent
+```
+
+The agent starts taking screenshots, calling Gemini, and clicking around. You'll see step-by-step logs in the terminal.
+
+**Abort at any time** by slamming your mouse into any corner of the screen — that triggers `pyautogui`'s failsafe.
+
+If the agent hits a 2FA prompt or a "Verify it's you" screen, it prints `[!] PAUSE:` and waits for input. Handle the prompt manually (tap your phone, enter a code, etc.), then press <kbd>Enter</kbd> in the terminal to resume. Type `q`+<kbd>Enter</kbd> to abort.
+
+### 9. Resume or reset
+
+If the agent halts partway through (quota, network, verifier fail), restart from the last verified step:
+
+```cmd
+python -m agent --resume
+```
+
+To wipe the checkpoint and start fresh:
+
+```cmd
+python -m agent --reset
+```
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| `'python' is not recognized as an internal or external command` | Rerun the Python installer and tick **"Add python.exe to PATH"**. Then open a **new** Command Prompt. |
+| `'git' is not recognized` | You skipped step 2. Either install Git from https://git-scm.com/download/win (then open a new cmd window) or download the repo as a ZIP. |
+| `RuntimeError: GEMINI_API_KEY is not set` | You forgot to edit `.env`. Run `notepad .env` and paste your key. |
+| Clicks land on the wrong pixel | Windows display scaling ≠ 100%. Right-click `python.exe` → Properties → Compatibility → **Change high DPI settings** → tick **Override high DPI scaling behavior** → set to **Application**. Or set Windows display scaling to 100% temporarily. |
+| Chrome keeps asking "Verify it's you" | The agent's Chrome profile is separate from your normal one. Use a persistent profile: `mkdir %USERPROFILE%\.chrome-agent-profile` then launch Chrome with `--user-data-dir="%USERPROFILE%\.chrome-agent-profile"` once and sign in. Future runs will reuse the session. |
+| `Retry budget exhausted` / 429 errors | You've hit Gemini's free daily quota. Wait 24h, or switch to a different model by setting `GEMINI_MODEL=gemini-2.5-flash-lite` in `.env`. |
+| Agent halts mid-run | Use `python -m agent --resume` to continue from the last verified step. |
+| Want to debug a flaky step | Set `SAVE_RUN_ARTIFACTS=true` in `.env`. Each run writes `runs/<timestamp>/step_NNN_*` with before/after screenshots, raw VLM responses, and a `summary.json`. |
+
+---
 
 ## Features
 
-- **Visual-Action Loop** — screenshot → VLM plan → regex parse → `pyautogui` execute → screenshot → VLM verify.
-- **Three commands**: `CLICK [X,Y]`, `PRESS [KEY]`, `TYPE [TEXT]`.
-- **Scaling correction** — VLM emits coordinates on a normalized 0–1000 grid; the agent auto-detects the native screen resolution and maps to pixels.
-- **Animation buffer** — a mandatory `time.sleep(1.5)` after any `CLICK` or `PRESS [win]` so OS UI animations can finish before the next screenshot.
-- **Regex-protected parsing** — tolerates conversational text and common bracket omissions; if a command cannot be parsed, the step is retried once.
-- **Short-term memory** — a rolling window of recent `(step, action, verdict)` records is fed back into each plan prompt so the VLM can reason about what has already happened. Tunable via `HISTORY_WINDOW`.
-- **Replan-on-failure with budget** — when the verifier reports FAIL, the agent tells the VLM what went wrong and asks for a different action, up to `MAX_REPLANS_PER_STEP` times before halting. Avoids both premature halts and runaway retry loops.
-- **Checkpoint + resume** — after every verified step the progress is atomically written to a JSON state file. Long runs can be resumed from the last successful step with `python -m agent --resume`.
-- **Two-stage CLICK refinement** (optional) — when enabled, after the planner emits a coarse `CLICK [x,y]` the agent crops a `TWO_STAGE_CROP_SIZE_PX` × `TWO_STAGE_CROP_SIZE_PX` region around that point, asks the VLM to list all plausible targets matching the step, and (if multiple are returned) a second VLM call disambiguates by picking the right one. Dramatically cuts "missed the address bar"-style failures on dense / multi-hitbox UIs. Toggle per run with `--two-stage-click` / `--no-two-stage-click`, or globally via `ENABLE_TWO_STAGE_CLICK`.
-- **Human-like input cadence** (bot-detection dodge) — every `CLICK` is preceded by a random sleep in `[CLICK_MIN_DELAY_SECONDS, CLICK_MAX_DELAY_SECONDS]`, and every character of a `TYPE` is followed by a random sleep in `[TYPE_MIN_INTERVAL_SECONDS, TYPE_MAX_INTERVAL_SECONDS]`, so the automation doesn't present a perfectly uniform rhythm to heuristic bot detectors. Set the upper bound to `0` to disable.
-- **Retry-with-backoff on quota / unavailability** — transient Gemini errors (`429 RESOURCE_EXHAUSTED`, `503 UNAVAILABLE`, other `5xx`) are retried with exponential backoff + full jitter, capped by `GEMINI_RETRY_MAX_DELAY_SECONDS`, up to `GEMINI_RETRY_MAX_ATTEMPTS` times. The agent **never** falls back to a different model — it waits and retries on the pinned `GEMINI_MODEL`.
-- **Verification + halt** — after every action, a second VLM call checks that the screen state matches the goal; if the replan budget is exhausted, execution halts and the user is notified via the terminal.
-- **Failsafe** — `pyautogui.FAILSAFE = True` (move the mouse to a screen corner to abort).
+- **Visual-Action Loop** — screenshot → VLM plan → parse → `pyautogui` execute → screenshot → VLM verify.
+- **Rich command set** — `CLICK` / `DOUBLE_CLICK` / `RIGHT_CLICK` / `MOVE_TO`, `CLICK_TEXT` (OCR-anchored), `PRESS`, `TYPE` (clipboard-based for Unicode), `SCROLL`, `DRAG`, `WAIT`, `PAUSE`.
+- **Two-stage CLICK** — after a coarse coordinate, the agent crops around the target and asks the VLM to refine + disambiguate. Cuts misclicks dramatically.
+- **Normalized grid** — VLM emits coordinates on a 0–1000 grid; agent auto-detects native resolution and maps to pixels.
+- **Short-term memory + replan** — rolling window of recent (step, action, verdict) rows fed back into the planner; on verifier FAIL the agent replans up to a configurable budget before halting.
+- **Checkpoint / resume** — `.agent_state.json` is written atomically after each verified step. `--resume` picks up where the last run halted.
+- **PAUSE on 2FA / CAPTCHA** — the VLM is taught to emit `PAUSE [reason]` when it sees a manual-approval screen. Agent halts cleanly without side-effects, then resumes on <kbd>Enter</kbd>.
+- **RPD guard** — tracks Gemini requests per day; warns at 75% of your free-tier quota and halts cleanly at 95% so `--resume` works later.
+- **Retry-with-backoff** — transient 429 / 5xx errors are retried with exponential + jittered backoff. No silent model fallback.
+- **Run artifacts** — per-step before/after screenshots, raw VLM output, verdicts, and `summary.json` for postmortems (`SAVE_RUN_ARTIFACTS=true`).
+- **Log redaction** — `TYPE` contents are logged as `<REDACTED, N chars>` by default, so passwords never hit disk.
+- **Failsafe** — mouse-to-corner kill switch is always on.
+
+---
+
+## Developer setup (Linux / macOS)
+
+Requires Python 3.10+ and a desktop environment with a display server (X11 / Wayland on Linux, native on macOS).
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+On Linux, `pyautogui` + `pyperclip` need a few extras:
+
+```bash
+sudo apt-get install -y python3-tk python3-dev scrot xclip
+```
+
+(`xclip` is needed so `pyperclip` can paste non-ASCII text via the OS clipboard. macOS ships `pbcopy`/`pbpaste` so no extra install is needed.)
+
+---
+
+## Configure
+
+```bash
+cp .env.example .env   # Windows: copy .env.example .env
+# then edit .env and paste your Gemini API key
+```
+
+Get a key at https://aistudio.google.com/app/apikey.
+
+Common env vars (full list in [`.env.example`](./.env.example)):
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `GEMINI_API_KEY` | — | **Required.** Google AI Studio API key. |
+| `GEMINI_MODEL` | `gemini-3.1-flash-lite-preview` | Any Gemini vision-capable model. |
+| `TASKS_FILE` | `tasks.txt` | Path to the instructions file. |
+| `ANIMATION_BUFFER_SECONDS` | `1.5` | Sleep after CLICK / PRESS so UI animations settle. |
+| `MAX_REPLANS_PER_STEP` | `2` | Replans allowed per step after a verifier FAIL. |
+| `MAX_TOTAL_REPLANS` | `10` | Global replan cap across the whole run. |
+| `HISTORY_WINDOW` | `5` | Recent (step, action, verdict) rows fed into each plan prompt. |
+| `STATE_FILE` | `.agent_state.json` | Checkpoint file for `--resume`. |
+| `ENABLE_TWO_STAGE_CLICK` | `true` | Toggle coarse→refined CLICK. |
+| `SAVE_RUN_ARTIFACTS` | `false` | Dump per-step before/after + VLM output + `summary.json` under `runs/<timestamp>/`. |
+| `RPD_LIMIT` | `500` | Gemini requests/day before HALT. Matches the 3.1-flash-lite-preview free tier. |
+| `RPD_WARN_THRESHOLD` / `RPD_HALT_THRESHOLD` | `0.75` / `0.95` | WARN and HALT fractions of `RPD_LIMIT`. |
+| `LOG_REDACT_TYPE` | `true` | Log `TYPE <REDACTED, N chars>` instead of literal text. |
+| `LOG_LEVEL` | `INFO` | Python logging level. |
+
+---
+
+## Write a task file
+
+`tasks.txt` is a plain text file. One natural-language instruction per line. Blank lines and lines starting with `#` are ignored.
+
+```
+# open notepad
+Press the Windows key to open the Start menu
+Type "notepad" to search for Notepad
+Press Enter to open Notepad
+Type "Hello from the Desktop VLM Agent!"
+
+# open a website
+Open Chrome
+Click the address bar
+Type "https://example.com" and press Enter
+```
+
+Instructions are free-form English. The agent is not parsing them directly — it feeds them to Gemini as goals, one at a time, and Gemini emits concrete commands.
+
+---
+
+## Run
+
+```bash
+python -m agent                # run from tasks.txt (fresh or continued from checkpoint)
+python -m agent --resume       # force resume from last verified step
+python -m agent --reset        # delete checkpoint and start fresh
+python -m agent --two-stage-click     # force two-stage CLICK on (overrides .env)
+python -m agent --no-two-stage-click  # force two-stage CLICK off (faster, less safe)
+```
+
+Logs go to stdout. On a halting verifier FAIL the agent exits with a non-zero code and prints the reason.
+
+**Abort at any time** by slamming your mouse into any screen corner — `pyautogui`'s failsafe.
+
+---
+
+## Command reference
+
+The VLM is instructed to respond with exactly one of the following:
+
+| Command | Example | Meaning |
+| --- | --- | --- |
+| `CLICK [X,Y]` | `CLICK [500,250]` | Left-click at normalized (0–1000) coordinates. |
+| `DOUBLE_CLICK [X,Y]` | `DOUBLE_CLICK [400,400]` | Double-click (e.g. open files/folders). |
+| `RIGHT_CLICK [X,Y]` | `RIGHT_CLICK [700,300]` | Right-click (context menu). |
+| `MOVE_TO [X,Y]` | `MOVE_TO [500,500]` | Move mouse without clicking (hover tooltips/menus). |
+| `CLICK_TEXT [label]` | `CLICK_TEXT [Sign in]` | OCR-anchored click on the nearest matching visible text. |
+| `PRESS [KEY]` | `PRESS [enter]`, `PRESS [ctrl+c]` | Press a single key or `+`-separated hotkey. |
+| `TYPE [TEXT]` | `TYPE [hello world]` | Type literal text. Non-ASCII is pasted via clipboard. |
+| `SCROLL [DIR, AMOUNT]` | `SCROLL [down, 5]` | Scroll up or down by AMOUNT wheel clicks. Both fields required. |
+| `DRAG [X1,Y1,X2,Y2]` | `DRAG [100,200,400,500]` | Click-and-drag from (X1,Y1) to (X2,Y2) on the 0–1000 grid. |
+| `WAIT [SECONDS]` | `WAIT [3]` | Pause execution for N seconds (no VLM call). |
+| `PAUSE [reason]` | `PAUSE [2FA prompt needs manual approval]` | Emitted by the VLM when it sees a 2FA / CAPTCHA / "Verify it's you" screen. Agent halts cleanly with zero side-effects and waits for <kbd>Enter</kbd>. |
+
+The parser is lenient — it recovers from conversational wrapping, missing brackets, or parentheses in place of brackets.
+
+---
 
 ## Architecture
 
@@ -30,7 +288,7 @@ tasks.txt ──▶ agent.run ──┐
    GeminiClient.plan_action              │
            │                             │
            ▼                             │
-      parse_command (regex)              │
+      parse_command (regex + JSON)       │
            │                             │
            ▼                             │
          execute (pyautogui)             │
@@ -41,163 +299,20 @@ tasks.txt ──▶ agent.run ──┐
                           ▼
               GeminiClient.verify ──▶ PASS ▶ next step
                           │
-                          └────────── FAIL ▶ halt + notify
+                          │
+                          └────────── FAIL ▶ replan (budget) ▶ halt + checkpoint
 ```
 
-## Install
-
-Requires Python 3.10+ and a desktop environment with a display server (X11 / Wayland on Linux, native on Windows/macOS).
-
-```bash
-python -m venv .venv
-source .venv/bin/activate     # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-On Linux, `pyautogui` needs a couple of extras:
-
-```bash
-sudo apt-get install -y python3-tk python3-dev scrot
-```
-
-## Configure
-
-```bash
-cp .env.example .env
-# then edit .env and paste your Gemini API key
-```
-
-Get a key at https://aistudio.google.com/app/apikey.
-
-Env vars (all optional except `GEMINI_API_KEY`):
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `GEMINI_API_KEY` | — | **Required.** API key for Google AI Studio. |
-| `GEMINI_MODEL` | `gemini-3.1-flash-lite-preview` | Any Gemini vision-capable model (e.g. `gemini-3.1-flash-lite-preview`, `gemini-2.5-flash-lite`, `gemini-2.5-flash`). Lite = cheaper + higher free-tier quota. |
-| `TASKS_FILE` | `tasks.txt` | Path to the instructions file. |
-| `ANIMATION_BUFFER_SECONDS` | `1.5` | Sleep after CLICK / PRESS [win]. |
-| `MAX_STEP_RETRIES` | `1` | Retries per attempt on unparseable VLM responses. |
-| `MAX_REPLANS_PER_STEP` | `2` | Replan attempts after a verifier FAIL before halting. |
-| `HISTORY_WINDOW` | `5` | Number of recent steps fed back to the VLM as short-term memory (0 = disabled). |
-| `STATE_FILE` | `.agent_state.json` | Checkpoint file written atomically after each verified step. |
-| `ENABLE_TWO_STAGE_CLICK` | `true` | Enable two-stage CLICK refinement (crop + VLM-refined pick + optional disambiguation). Overridable per run via `--two-stage-click` / `--no-two-stage-click`. |
-| `TWO_STAGE_CROP_SIZE_PX` | `300` | Side length (px) of the square cropped around the coarse click point for refinement. |
-| `MAX_CLICK_CANDIDATES` | `5` | Cap on the number of refined candidates to consider before disambiguation. |
-| `CLICK_MIN_DELAY_SECONDS` | `0.8` | Lower bound of the random pre-click sleep (bot-detection dodge). |
-| `CLICK_MAX_DELAY_SECONDS` | `2.0` | Upper bound of the random pre-click sleep. Set both to `0` to disable. |
-| `TYPE_MIN_INTERVAL_SECONDS` | `0.03` | Lower bound of the random per-keystroke pause during TYPE. |
-| `TYPE_MAX_INTERVAL_SECONDS` | `0.12` | Upper bound of the random per-keystroke pause. Set both to `0` to disable. |
-| `GEMINI_RETRY_MAX_ATTEMPTS` | `6` | Total attempts before giving up on a transient 429/5xx error. |
-| `GEMINI_RETRY_BASE_DELAY_SECONDS` | `5.0` | Base delay for exponential backoff (doubles each attempt). |
-| `GEMINI_RETRY_MAX_DELAY_SECONDS` | `300.0` | Cap on any single backoff interval (seconds). |
-| `LOG_LEVEL` | `INFO` | Standard Python logging level. |
-
-## Write a task file
-
-`tasks.txt` is a plain text file. One natural-language instruction per line. Blank lines and lines starting with `#` are ignored.
-
-```
-Press the Windows key to open the Start menu
-Type "notepad" to search for Notepad
-Press Enter to open Notepad
-Type "Hello from the Desktop VLM Agent!"
-```
-
-## Run
-
-```bash
-python -m agent                      # normal run, starts from step 1
-python -m agent --resume             # continue from the last verified step
-python -m agent --reset              # delete the checkpoint before running
-
-# Two-stage CLICK refinement (crop + VLM-refined pick) — toggle per run:
-python -m agent --two-stage-click    # force ON for this run (safer, +API calls)
-python -m agent --no-two-stage-click # force OFF for this run (faster, cheaper)
-```
-
-Logs go to stdout. On verification failure after the replan budget is exhausted, the agent halts with exit code 1, prints the reason, and suggests `--resume` so you can continue after fixing the blocker.
-
-**Abort at any time** by slamming your mouse into any corner of the screen — that triggers `pyautogui`'s failsafe.
-
-## Command reference
-
-The VLM is instructed to respond with exactly one of:
-
-| Command | Example | Meaning |
-| --- | --- | --- |
-| `CLICK [X,Y]` | `CLICK [500,250]` | Left-click at normalized (0–1000) coordinates. |
-| `DOUBLE_CLICK [X,Y]` | `DOUBLE_CLICK [400,400]` | Double-click (open files/folders). |
-| `RIGHT_CLICK [X,Y]` | `RIGHT_CLICK [700,300]` | Right-click (context menu). |
-| `MOVE_TO [X,Y]` | `MOVE_TO [500,500]` | Move mouse without clicking (hover tooltips/menus). |
-| `PRESS [KEY]` | `PRESS [win]`, `PRESS [ctrl+c]` | Press a single key or `+`-separated hotkey. |
-| `TYPE [TEXT]` | `TYPE [hello world]` | Type literal text (logs are redacted by default — see `LOG_REDACT_TYPE`). |
-| `SCROLL [DIR, AMOUNT]` | `SCROLL [down, 5]` | Scroll the active window up or down by N wheel clicks. |
-| `DRAG [X1,Y1,X2,Y2]` | `DRAG [100,200,500,600]` | Press at (X1,Y1), drag to (X2,Y2), release. |
-| `WAIT [SECONDS]` | `WAIT [2.5]` | Sleep `SECONDS` before the next step (capped at 60s). |
-| `CLICK_TEXT [LABEL]` | `CLICK_TEXT [Sign in]` | OCR the current screen and click the text whose label best matches `LABEL`. Deterministic for text targets — doesn't rely on the VLM's coordinate estimate at all. Requires `tesseract-ocr` installed. |
-| `PAUSE [REASON]` | `PAUSE [Approve sign-in on your phone]` | Halt the agent and wait for a human to resolve `REASON` (e.g. 2FA, CAPTCHA, "Verify it's you" prompts). The agent prints the reason, blocks on stdin, and resumes when you press Enter. Emitted automatically by the planner when it detects such prompts on screen. |
-
-The parser is lenient: it will still recover if the VLM omits brackets, wraps the command in prose, or uses parentheses instead of brackets. The legacy `CLICK`, `PRESS`, and `TYPE` paths are unchanged.
-
-### Structured JSON output
-
-When `ENABLE_JSON_OUTPUT=true` (default) the planner and verifier ask Gemini for a `response_schema`-constrained JSON object. Parsing is deterministic, so the agent skips its regex fallback on the common path. If JSON parsing fails for any reason, the agent still falls back to the legacy regex parser on the raw text — you never lose responses to a schema error. Set to `false` to force the legacy text-only path.
-
-### Global replan cap
-
-`MAX_TOTAL_REPLANS=10` (default) bounds replans across the entire run, not just per-step. When the cumulative replan count exceeds the cap, the agent halts with a clear "Global replan budget exhausted" message. Set to `0` to disable (legacy behavior: only the per-step cap applies).
-
-### Run artifacts
-
-Set `SAVE_RUN_ARTIFACTS=true` to capture every step of a run to `RUN_ARTIFACTS_DIR/<timestamp>/` (default `runs/`). Each step produces:
-
-```
-runs/20251201-193045/
-  step_001_before.png     # screenshot fed to the planner
-  step_001_after.png      # screenshot fed to the verifier
-  step_001_plan.txt       # raw VLM plan response + chosen action
-  step_001_verdict.txt    # PASS/FAIL + reason
-  step_002_before.png
-  ...
-  summary.json            # rolling per-step pass/fail list
-```
-
-Off by default — can fill disk on long runs. Flip it on when you need to debug a flaky step.
-
-### RPD (quota) guard
-
-`gemini-3.1-flash-lite-preview` has a 500 request-per-day free-tier limit, and the agent makes ~2 API calls per step (plan + verify, more with two-stage CLICK). The RPD guard tracks this run's calls and:
-
-- Logs a loud WARNING once usage crosses `RPD_WARN_THRESHOLD` (default 75%).
-- Halts cleanly between steps once usage crosses `RPD_HALT_THRESHOLD` (default 95%), with the checkpoint intact so `--resume` picks up later.
-
-Set `RPD_LIMIT=0` to disable both guards. Raise `RPD_LIMIT` if you've enabled paid-tier billing on your Google Cloud project (tens of thousands/day).
-
-## Persistent browser profile
-
-Google's "Verify it's you" device-trust challenge fires on every *new* browser, so log it in once and keep the profile around. `scripts/launch-chrome.sh` launches Chrome with a user-data-dir that survives across agent runs:
-
-```bash
-# First run: will prompt for password + device verification.
-./scripts/launch-chrome.sh https://accounts.google.com
-
-# Subsequent runs: reuse the same profile, skip the device challenge.
-PROFILE_DIR=~/my-agent-profile ./scripts/launch-chrome.sh https://youtube.com
-```
-
-The agent itself does not launch the browser — this helper just pairs a persistent profile with whatever Chrome-family binary is on your PATH (`google-chrome`, `chromium`, etc.).
-
-## System prerequisites
-
-- **`tesseract-ocr`** — required by the `CLICK_TEXT` primitive. On Debian/Ubuntu: `sudo apt-get install tesseract-ocr`. On macOS with Homebrew: `brew install tesseract`. If tesseract is missing, `CLICK_TEXT` silently logs a warning and falls back to the replan loop (it never crashes the agent).
+---
 
 ## Safety notes
 
 - The agent clicks, types, and presses keys on your **actual desktop**. Close anything sensitive before running it.
-- `pyautogui.FAILSAFE = True` is always on.
+- `pyautogui.FAILSAFE = True` is always on (mouse-to-corner aborts).
 - The verifier halts immediately on any ambiguous or negative verdict — it errs on the side of stopping.
-- Keys in `tasks.txt` are sent as literal keystrokes; never put secrets or passwords in it.
+- `TYPE` contents are redacted from logs by default. Still, avoid putting production passwords directly in `tasks.txt` — prefer a password manager that you copy-paste out of at `PAUSE` time.
+
+---
 
 ## Project layout
 
@@ -205,16 +320,21 @@ The agent itself does not launch the browser — this helper just pairs a persis
 desktop-vlm-agent/
 ├── agent/
 │   ├── __init__.py
-│   ├── __main__.py      # entry point (python -m agent)
-│   ├── agent.py         # main run-loop
-│   ├── config.py        # .env loading
-│   ├── executor.py      # pyautogui wrapper + animation buffer
-│   ├── parser.py        # regex command parser (crash-proof)
-│   ├── screen.py        # screenshot + 0-1000 <-> pixel scaling
-│   └── vlm.py           # Gemini 2.0 Flash client
-├── tests/
-│   ├── test_parser.py
-│   └── test_screen.py
+│   ├── __main__.py      # CLI entry (python -m agent)
+│   ├── agent.py         # main run-loop + replan + checkpoint
+│   ├── artifacts.py     # per-step run artifacts (SAVE_RUN_ARTIFACTS)
+│   ├── config.py        # .env loading + validation
+│   ├── cost.py          # RPD guard (requests-per-day quota tracker)
+│   ├── executor.py      # pyautogui wrapper + human-like cadence
+│   ├── history.py       # rolling short-term memory
+│   ├── ocr.py           # pytesseract-backed CLICK_TEXT
+│   ├── parser.py        # command parser (regex + JSON, lenient)
+│   ├── screen.py        # screenshot + 0-1000 ↔ pixel scaling + overlays
+│   ├── state.py         # checkpoint file (atomic writes)
+│   └── vlm.py           # Gemini client (plan + verify + retry)
+├── scripts/
+│   └── launch-chrome.sh # persistent-profile Chrome launcher (Linux)
+├── tests/               # pytest unit tests
 ├── .env.example
 ├── .gitignore
 ├── README.md

@@ -33,6 +33,8 @@ from .parser import (
     MoveToCommand,
     PauseCommand,
     PressCommand,
+    RecallCommand,
+    RememberCommand,
     RightClickCommand,
     ScrollCommand,
     TypeCommand,
@@ -54,7 +56,8 @@ class PlanResponseModel(BaseModel):
         description=(
             "The action kind. Must be one of: CLICK, DOUBLE_CLICK, "
             "RIGHT_CLICK, MOVE_TO, PRESS, TYPE, SCROLL, DRAG, WAIT, "
-            "CLICK_TEXT, PAUSE, DOWNLOAD, ATTACH_FILE, CAPTURE_FOR_AI."
+            "CLICK_TEXT, PAUSE, DOWNLOAD, ATTACH_FILE, CAPTURE_FOR_AI, "
+            "REMEMBER, RECALL."
         )
     )
     x: int | None = Field(default=None, description="Normalized X in [0,1000].")
@@ -84,6 +87,28 @@ class PlanResponseModel(BaseModel):
             "DOWNLOAD this is optional (derived from the URL when missing). "
             "For ATTACH_FILE it is required. For CAPTURE_FOR_AI it is "
             "optional (the current screen is captured when missing)."
+        ),
+    )
+    name: str | None = Field(
+        default=None,
+        description=(
+            "Variable name for REMEMBER / RECALL. Must match "
+            "[A-Za-z_][A-Za-z0-9_]*."
+        ),
+    )
+    literal_value: str | None = Field(
+        default=None,
+        description=(
+            "For REMEMBER, an explicit literal value to store. When omitted "
+            "and `from_screen=true`, the agent asks the VLM to extract the "
+            "value from the current screen."
+        ),
+    )
+    from_screen: bool | None = Field(
+        default=None,
+        description=(
+            "For REMEMBER: true means extract the value from the current "
+            "screenshot via the VLM. False/null means use `literal_value`."
         ),
     )
 
@@ -213,6 +238,19 @@ def plan_response_to_command(resp: PlanResponseModel) -> Command | None:
         if kind == "CAPTURE_FOR_AI":
             # filename optional — empty means "grab the current screen".
             return CaptureForAiCommand(filename=(resp.filename or "").strip())
+        if kind == "REMEMBER" and resp.name:
+            literal = resp.literal_value
+            from_screen = (
+                bool(resp.from_screen) if resp.from_screen is not None
+                else (literal is None or literal == "")
+            )
+            return RememberCommand(
+                name=resp.name.strip(),
+                literal_value=(literal or "").strip(),
+                from_screen=from_screen,
+            )
+        if kind == "RECALL" and resp.name:
+            return RecallCommand(name=resp.name.strip())
     except (TypeError, ValueError) as exc:
         log.warning("plan_response_to_command: bad payload: %s", exc)
         return None
@@ -332,6 +370,9 @@ RESPOND WITH EXACTLY ONE COMMAND on its own line, chosen from:
     DOWNLOAD [URL, FILENAME] — fetch URL via HTTPS into the run's file workspace. URL must start with http:// or https://. FILENAME is optional (derived from the URL path when missing). The file is persisted according to the run's file mode (temp / save / feed). Example: DOWNLOAD [https://example.com/inv.pdf, invoice.pdf].
     ATTACH_FILE [FILENAME]   — type a path into the focused OS file-picker dialog (Ctrl+L, type path, press Enter). The dialog must already be open (you should have CLICKed the Browse button on the previous step). FILENAME is resolved against the workspace first, then disk. Example: ATTACH_FILE [invoice.pdf].
     CAPTURE_FOR_AI [FILENAME] — buffer an image to feed into the NEXT plan_action call as additional context. Useful when an answer requires reading text from a PDF / receipt / image you've just opened. With no FILENAME, the current screen is captured. With a FILENAME, that file is read from the workspace or disk. Example: CAPTURE_FOR_AI [] or CAPTURE_FOR_AI [invoice.pdf].
+    REMEMBER [NAME]          — extract the value labeled NAME off the current screen and store it as a run variable. NAME is a plain identifier (alphanumeric and underscores). The agent will read the screenshot and decide what value belongs to NAME — pick this command when the next steps need a value (order id, confirmation number, account name, etc.) that is currently visible on screen. Example: REMEMBER [order_id].
+    REMEMBER [NAME = LITERAL] — store LITERAL as the value of NAME with no extraction. Useful when you already know the value (e.g. derived from a previous CAPTURE_FOR_AI). Example: REMEMBER [order_id = ND12345].
+    RECALL [NAME]            — type the stored value of variable NAME into the focused field. Equivalent to TYPE [{{var.NAME}}]. Use after a REMEMBER. Example: RECALL [order_id].
 
 Rules:
 - Output ONLY the command, wrapped in square brackets. No prose, no markdown, no explanation.
@@ -389,10 +430,52 @@ where N is the 1-based number of the best rectangle. If NONE of the rectangles m
 """
 
 
+EXTRACT_SYSTEM_PROMPT = """You are a value-extraction assistant for a desktop automation agent.
+
+You are given:
+  1. A screenshot of the user's screen.
+  2. A NAME (a plain identifier like "order_id" or "confirmation_number" or "total_amount") describing the value the agent wants to read off the screen.
+  3. Optionally a HINT — a natural-language sentence elaborating on what to look for.
+
+Find the value of NAME on the screen and respond with EXACTLY ONE line in this format:
+
+    VALUE: <the extracted value>
+
+Rules:
+- Output ONLY the literal value (no labels, no surrounding quotes, no prose).
+- If the value is clearly NOT visible on screen, respond with the single line: NONE
+- Strip leading/trailing whitespace from the value.
+- For numeric values, include relevant decimal points / currency symbols / dashes exactly as shown.
+- Do NOT include the prefix word (e.g. "Order ID:") in the value — only the value itself.
+"""
+
+
+class ExtractResponseModel(BaseModel):
+    """Structured schema for ``extract_value`` JSON output."""
+
+    found: bool = Field(description="Whether the value was found on the screen.")
+    value: str = Field(default="", description="The extracted value, stripped.")
+
+
 @dataclass(frozen=True)
 class VerificationResult:
     passed: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class ExtractionResult:
+    """Outcome of ``GeminiClient.extract_value``.
+
+    ``found`` is True when the VLM located a value, in which case ``value``
+    is the extracted string (already stripped). When ``found`` is False the
+    caller should treat the REMEMBER step as a FAIL so the replan loop can
+    try again from a different vantage point.
+    """
+
+    found: bool
+    value: str
+    raw: str = ""
 
 
 class GeminiClient:

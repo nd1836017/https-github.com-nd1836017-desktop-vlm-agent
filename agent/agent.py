@@ -265,6 +265,12 @@ def _attempt_step(
     command that was executed, or a synthetic marker if we never got a
     parseable command.
     """
+    # Drain the feed buffer ONCE per step attempt, BEFORE the parse-retry
+    # loop. consume_feed() is destructive (clears the buffer), so calling it
+    # inside the loop would silently drop the captured images on every retry
+    # after the first. The same images are reused across all parse retries
+    # for this same step.
+    extra_images = workspace.consume_feed() if workspace is not None else []
     attempts = 0
     last_parse_error = ""
     while attempts <= max_parse_retries:
@@ -272,10 +278,6 @@ def _attempt_step(
         screenshot = capture_screenshot()
         if artifact_writer is not None:
             artifact_writer.save_before(step_idx, screenshot)
-        # Drain any image bytes pushed by a prior CAPTURE_FOR_AI / FEED-mode
-        # DOWNLOAD so the planner can see them on this call. consume_feed
-        # is destructive — bytes are delivered exactly once.
-        extra_images = workspace.consume_feed() if workspace is not None else []
         raw, cmd = vlm.plan_action(
             step,
             screenshot,

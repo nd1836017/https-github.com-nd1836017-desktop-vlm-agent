@@ -229,6 +229,39 @@ class VerifyResponseModel(BaseModel):
 # explicitly said: "do not fall back to another model, wait then try again".
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
+# Pull a leading "503 ..." style HTTP status code out of an exception's
+# message string. Used as the last-ditch fallback when neither ``code``
+# nor ``status_code`` is set as an attribute (defensive against future
+# google-genai SDK shapes — APIError today exposes ``code``).
+_LEADING_HTTP_STATUS_RE = re.compile(r"^\s*(\d{3})\b")
+
+
+def _status_code_of(exc: BaseException) -> int | None:
+    """Best-effort HTTP status extraction from a google-genai APIError.
+
+    The current ``google-genai`` SDK (``APIError`` subclasses) exposes the
+    HTTP status as the ``code`` attribute. Older / forked versions, and a
+    handful of internal wrapper exceptions, have used ``status_code`` or
+    ``http_status`` instead. We try each in order, then fall back to
+    parsing the leading status code out of ``str(exc)`` (the SDK formats
+    its message as ``"{code} {status}. {details}"``). If nothing extractable
+    is found we return ``None`` and the caller re-raises immediately —
+    which is the safe default: we'd rather surface an unfamiliar error
+    quickly than retry it ``retry_max_attempts`` times for nothing.
+    """
+    for attr in ("code", "status_code", "http_status"):
+        v = getattr(exc, attr, None)
+        if isinstance(v, int):
+            return v
+        if isinstance(v, str) and v.isdigit():
+            return int(v)
+    msg = str(exc) if exc is not None else ""
+    m = _LEADING_HTTP_STATUS_RE.match(msg)
+    if m:
+        return int(m.group(1))
+    return None
+
+
 T = TypeVar("T")
 
 
@@ -258,7 +291,7 @@ def _call_with_retry(
         try:
             return fn()
         except (genai_errors.ServerError, genai_errors.ClientError) as exc:
-            status = getattr(exc, "status_code", getattr(exc, "code", None))
+            status = _status_code_of(exc)
             if status not in _RETRYABLE_STATUS:
                 raise
             last_exc = exc

@@ -331,6 +331,27 @@ def _attempt_step(
                 )
             log.info("Action: %s", action_text)
             if artifact_writer is not None:
+                # Take a post-action screenshot for the artifact bundle so
+                # the file-command path matches the regular action path
+                # (which captures both before/after). DOWNLOAD and
+                # CAPTURE_FOR_AI rarely change the screen, but ATTACH_FILE
+                # does (the path appears in the file-picker), and even
+                # for the no-change cases an `after` snapshot lets a
+                # postmortem reader confirm the screen didn't change
+                # unexpectedly during the network/IO operation.
+                try:
+                    post_screenshot = capture_screenshot()
+                    artifact_writer.save_after(step_idx, post_screenshot)
+                except Exception as exc:  # pragma: no cover - defensive
+                    # Artifact saving must never crash the agent. The
+                    # writer's own `_write_image` already swallows OSError
+                    # but a screen-capture failure would bubble up here.
+                    log.warning(
+                        "Failed to capture post-action screenshot for "
+                        "file command on step %d: %s",
+                        step_idx,
+                        exc,
+                    )
                 artifact_writer.save_plan(step_idx, raw, action_text)
                 artifact_writer.save_verdict(step_idx, ok, action_text)
             return (
@@ -493,12 +514,28 @@ def run_step(
             history.record(step, last_action_text, passed=False, reason=halted.reason)
             return halted
 
-        log.info(
-            "Step attempt %d/%d (replan budget: %d remaining)",
-            attempt_idx,
-            total_attempts,
-            total_attempts - attempt_idx,
-        )
+        # Log the attempt number plus an unambiguous replan-budget label.
+        # `total_attempts = max_replans + 1` (the initial attempt is not a
+        # replan). On attempt 1 we have all `max_replans` replans available;
+        # on attempt 2 we're using replan #1; etc.
+        max_replans = total_attempts - 1
+        if not is_replan_attempt:
+            log.info(
+                "Step attempt %d/%d (initial — %d replan(s) available if this fails)",
+                attempt_idx,
+                total_attempts,
+                max_replans,
+            )
+        else:
+            replan_number = attempt_idx - 1
+            log.info(
+                "Step attempt %d/%d (replan %d/%d — %d replan(s) left after this)",
+                attempt_idx,
+                total_attempts,
+                replan_number,
+                max_replans,
+                max_replans - replan_number,
+            )
 
         verdict, action_text = _attempt_step(
             step=step,

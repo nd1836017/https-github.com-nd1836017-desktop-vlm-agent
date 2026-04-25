@@ -258,19 +258,21 @@ def _attempt_step(
     artifact_writer: ArtifactWriter | None = None,
     workspace: FileWorkspace | None = None,
     step_idx: int = 0,
+    extra_images: list[bytes] | None = None,
 ) -> tuple[VerificationResult | PauseRequested, str]:
     """Run one plan/execute/verify attempt and return (verdict, action_text).
 
     Handles parse-failure retry internally. `action_text` is the rendered
     command that was executed, or a synthetic marker if we never got a
     parseable command.
+
+    `extra_images` is owned by ``run_step`` (which drains the workspace's
+    feed buffer ONCE per step) and passed through to every call here so
+    parse retries AND replan attempts on the same step see the same
+    images. Passing ``None`` is equivalent to ``[]``.
     """
-    # Drain the feed buffer ONCE per step attempt, BEFORE the parse-retry
-    # loop. consume_feed() is destructive (clears the buffer), so calling it
-    # inside the loop would silently drop the captured images on every retry
-    # after the first. The same images are reused across all parse retries
-    # for this same step.
-    extra_images = workspace.consume_feed() if workspace is not None else []
+    if extra_images is None:
+        extra_images = []
     attempts = 0
     last_parse_error = ""
     while attempts <= max_parse_retries:
@@ -445,6 +447,12 @@ def run_step(
     previous_failure = ""
     last_verdict: VerificationResult | None = None
     last_action_text = "<no-action>"
+    # Drain the workspace's feed buffer ONCE per step. consume_feed() is
+    # destructive, so we own the bytes here and pass them down to every
+    # _attempt_step call — parse retries AND replan attempts all see the
+    # same captured images. The buffer would otherwise empty after the
+    # first attempt, silently losing CAPTURE_FOR_AI context on replans.
+    extra_images = workspace.consume_feed() if workspace is not None else []
     # Number of real (non-PAUSE) attempts that have been consumed so far.
     # PAUSE iterations do NOT advance this counter — a PAUSE means "human
     # intervention changed the screen, so let me try again fresh" and must
@@ -511,6 +519,7 @@ def run_step(
             artifact_writer=artifact_writer,
             workspace=workspace,
             step_idx=step_idx,
+            extra_images=extra_images,
         )
 
         # PAUSE: ask the human, then loop back without consuming the

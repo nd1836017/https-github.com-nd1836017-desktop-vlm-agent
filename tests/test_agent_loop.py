@@ -489,3 +489,48 @@ def test_capture_for_ai_buffer_survives_parse_retry(tmp_path, fake_geometry):
         "step 2 attempt 2 (parse retry) should ALSO see the captured image; "
         "consume_feed() must not be called inside the parse-retry loop"
     )
+
+
+def test_capture_for_ai_buffer_survives_replan(tmp_path, fake_geometry):
+    """Replan attempts (verifier FAIL → new _attempt_step) must reuse the
+    same feed buffer. Regression test: previously consume_feed() lived in
+    _attempt_step so the second invocation drained nothing.
+    """
+    from agent.files import FileMode
+
+    tasks_text = "CAPTURE_FOR_AI []\nClick the OK button\n"
+    cfg = _cfg(
+        tmp_path,
+        tasks_text,
+        file_mode=FileMode.FEED,
+        workdir=None,
+        max_replans_per_step=2,
+    )
+
+    client = FakeClient(
+        plan_outputs=[
+            "CAPTURE_FOR_AI []",  # step 1
+            "CLICK [10,10]",       # step 2 attempt 1
+            "CLICK [20,20]",       # step 2 replan #1 (after FAIL)
+        ],
+        verify_outputs=[
+            VerificationResult(passed=False, reason="wrong button"),
+            VerificationResult(passed=True, reason="ok now"),
+        ],
+    )
+    with (
+        mock.patch("agent.agent.GeminiClient", return_value=client),
+        mock.patch("agent.agent.detect_geometry", return_value=fake_geometry),
+    ):
+        exit_code = run(cfg)
+    assert exit_code == 0
+    assert len(client.plan_calls) == 3
+    # Step 1 ran without buffer.
+    assert client.plan_calls[0]["extra_images"] == []
+    # Step 2 attempt 1 received the captured image.
+    assert len(client.plan_calls[1]["extra_images"]) == 1
+    # Step 2 replan ALSO received the captured image (would have been [] before).
+    assert len(client.plan_calls[2]["extra_images"]) == 1, (
+        "step 2 replan attempt should still see the captured image; "
+        "consume_feed must be hoisted to run_step level"
+    )

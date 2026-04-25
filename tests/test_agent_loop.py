@@ -117,6 +117,8 @@ def _cfg(tmp_path, tasks_text: str, **overrides) -> Config:
         file_mode=None,
         workdir=None,
         log_level="INFO",
+        step_timeout_seconds=0.0,
+        stuck_step_threshold=0,
     )
     defaults.update(overrides)
     return Config(**defaults)

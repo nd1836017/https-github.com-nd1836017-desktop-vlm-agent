@@ -33,6 +33,8 @@ from .parser import (
     MoveToCommand,
     PauseCommand,
     PressCommand,
+    RecallCommand,
+    RememberCommand,
     RightClickCommand,
     ScrollCommand,
     TypeCommand,
@@ -54,7 +56,8 @@ class PlanResponseModel(BaseModel):
         description=(
             "The action kind. Must be one of: CLICK, DOUBLE_CLICK, "
             "RIGHT_CLICK, MOVE_TO, PRESS, TYPE, SCROLL, DRAG, WAIT, "
-            "CLICK_TEXT, PAUSE, DOWNLOAD, ATTACH_FILE, CAPTURE_FOR_AI."
+            "CLICK_TEXT, PAUSE, DOWNLOAD, ATTACH_FILE, CAPTURE_FOR_AI, "
+            "REMEMBER, RECALL."
         )
     )
     x: int | None = Field(default=None, description="Normalized X in [0,1000].")
@@ -84,6 +87,28 @@ class PlanResponseModel(BaseModel):
             "DOWNLOAD this is optional (derived from the URL when missing). "
             "For ATTACH_FILE it is required. For CAPTURE_FOR_AI it is "
             "optional (the current screen is captured when missing)."
+        ),
+    )
+    name: str | None = Field(
+        default=None,
+        description=(
+            "Variable name for REMEMBER / RECALL. Must match "
+            "[A-Za-z_][A-Za-z0-9_]*."
+        ),
+    )
+    literal_value: str | None = Field(
+        default=None,
+        description=(
+            "For REMEMBER, an explicit literal value to store. When omitted "
+            "and `from_screen=true`, the agent asks the VLM to extract the "
+            "value from the current screen."
+        ),
+    )
+    from_screen: bool | None = Field(
+        default=None,
+        description=(
+            "For REMEMBER: true means extract the value from the current "
+            "screenshot via the VLM. False/null means use `literal_value`."
         ),
     )
 
@@ -162,6 +187,28 @@ def _parse_verify_response_json(text: str) -> VerifyResponseModel | None:
         return None
 
 
+def _parse_extract_response_json(text: str):
+    """Best-effort JSON -> ExtractResponseModel for extract_value's safety net.
+
+    Returns ``None`` if the text isn't valid JSON in the expected shape.
+    Defined here as a module function (mirroring ``_parse_verify_response_json``)
+    so it can be unit-tested independently of the live VLM client.
+    """
+    stripped = _strip_markdown_fences(text)
+    if not stripped:
+        return None
+    try:
+        payload = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return ExtractResponseModel.model_validate(payload)
+    except ValidationError:
+        return None
+
+
 def plan_response_to_command(resp: PlanResponseModel) -> Command | None:
     """Convert a parsed JSON schema response into a Command instance."""
     kind = (resp.command or "").upper().strip()
@@ -213,6 +260,19 @@ def plan_response_to_command(resp: PlanResponseModel) -> Command | None:
         if kind == "CAPTURE_FOR_AI":
             # filename optional — empty means "grab the current screen".
             return CaptureForAiCommand(filename=(resp.filename or "").strip())
+        if kind == "REMEMBER" and resp.name:
+            literal = resp.literal_value
+            from_screen = (
+                bool(resp.from_screen) if resp.from_screen is not None
+                else (literal is None or literal == "")
+            )
+            return RememberCommand(
+                name=resp.name.strip(),
+                literal_value=(literal or "").strip(),
+                from_screen=from_screen,
+            )
+        if kind == "RECALL" and resp.name:
+            return RecallCommand(name=resp.name.strip())
     except (TypeError, ValueError) as exc:
         log.warning("plan_response_to_command: bad payload: %s", exc)
         return None
@@ -332,6 +392,9 @@ RESPOND WITH EXACTLY ONE COMMAND on its own line, chosen from:
     DOWNLOAD [URL, FILENAME] — fetch URL via HTTPS into the run's file workspace. URL must start with http:// or https://. FILENAME is optional (derived from the URL path when missing). The file is persisted according to the run's file mode (temp / save / feed). Example: DOWNLOAD [https://example.com/inv.pdf, invoice.pdf].
     ATTACH_FILE [FILENAME]   — type a path into the focused OS file-picker dialog (Ctrl+L, type path, press Enter). The dialog must already be open (you should have CLICKed the Browse button on the previous step). FILENAME is resolved against the workspace first, then disk. Example: ATTACH_FILE [invoice.pdf].
     CAPTURE_FOR_AI [FILENAME] — buffer an image to feed into the NEXT plan_action call as additional context. Useful when an answer requires reading text from a PDF / receipt / image you've just opened. With no FILENAME, the current screen is captured. With a FILENAME, that file is read from the workspace or disk. Example: CAPTURE_FOR_AI [] or CAPTURE_FOR_AI [invoice.pdf].
+    REMEMBER [NAME]          — extract the value labeled NAME off the current screen and store it as a run variable. NAME is a plain identifier (alphanumeric and underscores). The agent will read the screenshot and decide what value belongs to NAME — pick this command when the next steps need a value (order id, confirmation number, account name, etc.) that is currently visible on screen. Example: REMEMBER [order_id].
+    REMEMBER [NAME = LITERAL] — store LITERAL as the value of NAME with no extraction. Useful when you already know the value (e.g. derived from a previous CAPTURE_FOR_AI). Example: REMEMBER [order_id = ND12345].
+    RECALL [NAME]            — type the stored value of variable NAME into the focused field. Equivalent to TYPE [{{var.NAME}}]. Use after a REMEMBER. Example: RECALL [order_id].
 
 Rules:
 - Output ONLY the command, wrapped in square brackets. No prose, no markdown, no explanation.
@@ -389,10 +452,52 @@ where N is the 1-based number of the best rectangle. If NONE of the rectangles m
 """
 
 
+EXTRACT_SYSTEM_PROMPT = """You are a value-extraction assistant for a desktop automation agent.
+
+You are given:
+  1. A screenshot of the user's screen.
+  2. A NAME (a plain identifier like "order_id" or "confirmation_number" or "total_amount") describing the value the agent wants to read off the screen.
+  3. Optionally a HINT — a natural-language sentence elaborating on what to look for.
+
+Find the value of NAME on the screen and respond with EXACTLY ONE line in this format:
+
+    VALUE: <the extracted value>
+
+Rules:
+- Output ONLY the literal value (no labels, no surrounding quotes, no prose).
+- If the value is clearly NOT visible on screen, respond with the single line: NONE
+- Strip leading/trailing whitespace from the value.
+- For numeric values, include relevant decimal points / currency symbols / dashes exactly as shown.
+- Do NOT include the prefix word (e.g. "Order ID:") in the value — only the value itself.
+"""
+
+
+class ExtractResponseModel(BaseModel):
+    """Structured schema for ``extract_value`` JSON output."""
+
+    found: bool = Field(description="Whether the value was found on the screen.")
+    value: str = Field(default="", description="The extracted value, stripped.")
+
+
 @dataclass(frozen=True)
 class VerificationResult:
     passed: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class ExtractionResult:
+    """Outcome of ``GeminiClient.extract_value``.
+
+    ``found`` is True when the VLM located a value, in which case ``value``
+    is the extracted string (already stripped). When ``found`` is False the
+    caller should treat the REMEMBER step as a FAIL so the replan loop can
+    try again from a different vantage point.
+    """
+
+    found: bool
+    value: str
+    raw: str = ""
 
 
 class GeminiClient:
@@ -435,6 +540,14 @@ class GeminiClient:
         )
         self._disambig_config = types.GenerateContentConfig(
             system_instruction=DISAMBIG_SYSTEM_PROMPT,
+        )
+        self._extract_config = types.GenerateContentConfig(
+            system_instruction=EXTRACT_SYSTEM_PROMPT,
+        )
+        self._extract_config_json = types.GenerateContentConfig(
+            system_instruction=EXTRACT_SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            response_schema=ExtractResponseModel,
         )
         log.info(
             "Initialized Gemini client with model=%s (json_output=%s)",
@@ -713,3 +826,82 @@ class GeminiClient:
         if pick < 0 or pick > num_candidates:
             return 0
         return pick
+
+    def extract_value(
+        self,
+        name: str,
+        screenshot: Image.Image,
+        hint: str = "",
+    ) -> ExtractionResult:
+        """Ask the VLM to read the value of ``name`` off the screen.
+
+        Used by the REMEMBER primitive when no literal is given. ``name`` is a
+        plain identifier like ``order_id``; ``hint`` is an optional natural
+        language sentence elaborating on what to look for (e.g. "the
+        confirmation number, formatted as 12 digits with dashes").
+
+        Returns an ExtractionResult; on failure the caller treats the step as
+        FAIL and the replan loop kicks in.
+        """
+        parts = [f"NAME: {name}"]
+        if hint:
+            parts.append(f"HINT: {hint}")
+        parts.append(
+            "Find the value of NAME on the screen. "
+            "Respond with the literal value or NONE."
+        )
+        prompt = "\n\n".join(parts)
+
+        if self._enable_json_output:
+            response = self._generate(
+                "extract_value_json",
+                [prompt, screenshot],
+                self._extract_config_json,
+            )
+            text = (response.text or "").strip()
+            log.debug("extract_value response (json): %r", text)
+
+            parsed = getattr(response, "parsed", None)
+            if not isinstance(parsed, ExtractResponseModel):
+                # Manual JSON decode as a safety net.
+                parsed = _parse_extract_response_json(text)
+
+            if isinstance(parsed, ExtractResponseModel):
+                if parsed.found and parsed.value.strip():
+                    return ExtractionResult(
+                        found=True,
+                        value=parsed.value.strip(),
+                        raw=text,
+                    )
+                return ExtractionResult(found=False, value="", raw=text)
+            # Last-ditch text parse.
+            return self._parse_extract_text(text)
+
+        response = self._generate(
+            "extract_value", [prompt, screenshot], self._extract_config
+        )
+        text = (response.text or "").strip()
+        log.debug("extract_value response: %r", text)
+        return self._parse_extract_text(text)
+
+    @staticmethod
+    def _parse_extract_text(text: str) -> ExtractionResult:
+        """Parse a free-form extract response into an ExtractionResult."""
+        if not text:
+            return ExtractionResult(found=False, value="", raw="")
+        upper = text.strip().upper()
+        if upper == "NONE" or upper.startswith("NONE\n"):
+            return ExtractionResult(found=False, value="", raw=text)
+        # Strip the optional ``VALUE: `` prefix the system prompt asks for.
+        m = re.match(r"\s*VALUE\s*:\s*(.*)", text, re.IGNORECASE | re.DOTALL)
+        if m:
+            value = m.group(1).strip()
+        else:
+            # Free-form: take the first non-empty line as the value.
+            value = next(
+                (line.strip() for line in text.splitlines() if line.strip()),
+                "",
+            )
+        if not value or value.upper() == "NONE":
+            return ExtractionResult(found=False, value="", raw=text)
+        return ExtractionResult(found=True, value=value, raw=text)

@@ -30,6 +30,18 @@ Supported commands:
                                   call (no disk write).
     CAPTURE_FOR_AI [FILENAME]   — same, but also reads bytes from
                                   FILENAME (useful for non-screen content).
+    REMEMBER [name]             — read the value labeled ``name`` off the
+                                  current screen and store it as a run
+                                  variable, accessible later via the
+                                  ``{{var.name}}`` placeholder. Uses the
+                                  VLM to extract the value (no typing).
+    REMEMBER [name = literal]   — store ``literal`` directly as the value
+                                  of variable ``name``. No VLM call.
+    RECALL [name]               — alias for ``TYPE [{{var.name}}]``: types
+                                  the stored value of ``name`` into the
+                                  currently focused field. Convenience
+                                  primitive when you don't want to write
+                                  the placeholder out.
 
 The parser is defensive: it tolerates surrounding conversational text,
 case variations, and a few common bracket omissions. It never raises on
@@ -60,6 +72,8 @@ CommandType = Literal[
     "DOWNLOAD",
     "ATTACH_FILE",
     "CAPTURE_FOR_AI",
+    "REMEMBER",
+    "RECALL",
 ]
 
 
@@ -173,6 +187,41 @@ class CaptureForAiCommand:
     filename: str = ""
 
 
+@dataclass(frozen=True)
+class RememberCommand:
+    """Store a value into the run's variable store.
+
+    Two forms:
+
+    - ``REMEMBER [name = literal]`` — ``literal`` is stored as-is, with no
+      VLM round-trip. ``literal`` is set on ``literal_value`` and
+      ``from_screen`` is False.
+    - ``REMEMBER [name]`` — the agent asks the VLM to extract the value
+      labeled ``name`` from the current screen. ``literal_value`` is empty
+      and ``from_screen`` is True.
+
+    The stored value is accessible later via the ``{{var.<name>}}``
+    placeholder, which is substituted at runtime before the next step is
+    sent to the planner.
+    """
+
+    kind: CommandType = "REMEMBER"
+    name: str = ""
+    literal_value: str = ""
+    from_screen: bool = False
+
+
+@dataclass(frozen=True)
+class RecallCommand:
+    """Type the stored value of variable ``name`` into the focused field.
+
+    Equivalent to ``TYPE [{{var.<name>}}]`` but more explicit.
+    """
+
+    kind: CommandType = "RECALL"
+    name: str = ""
+
+
 Command = (
     ClickCommand
     | DoubleClickCommand
@@ -188,6 +237,8 @@ Command = (
     | DownloadCommand
     | AttachFileCommand
     | CaptureForAiCommand
+    | RememberCommand
+    | RecallCommand
 )
 
 
@@ -254,6 +305,18 @@ _CAPTURE_FOR_AI_RE = re.compile(
     r"CAPTURE[_\s]?FOR[_\s]?AI\s*\[\s*(.*?)\s*\]",
     re.IGNORECASE,
 )
+# REMEMBER accepts two forms:
+#   REMEMBER [name]              -> from_screen=True, no literal
+#   REMEMBER [name = some text]  -> literal_value="some text"
+# ``name`` is alphanumeric + underscore (variable identifier shape).
+_REMEMBER_RE = re.compile(
+    r"REMEMBER\s*\[\s*([A-Za-z_][\w]*)\s*(?:=\s*(.*?))?\s*\]",
+    re.IGNORECASE | re.DOTALL,
+)
+_RECALL_RE = re.compile(
+    r"RECALL\s*\[\s*([A-Za-z_][\w]*)\s*\]",
+    re.IGNORECASE,
+)
 
 
 # --- Lenient fallbacks (missing brackets, common prose forms). ----------------
@@ -307,6 +370,27 @@ def parse_command(response: str) -> Command | None:
         if m:
             fname = (m.group(1) or "").strip()
             return CaptureForAiCommand(filename=fname)
+
+        # REMEMBER / RECALL must be tried before CLICK_TEXT — otherwise the
+        # CLICK_TEXT regex (which is very permissive about its label arg)
+        # would happily eat ``REMEMBER [order_id]`` as a label.
+        m = _REMEMBER_RE.search(response)
+        if m:
+            name = m.group(1).strip()
+            literal = m.group(2)
+            if literal is None:
+                return RememberCommand(name=name, from_screen=True)
+            return RememberCommand(
+                name=name,
+                literal_value=literal.strip(),
+                from_screen=False,
+            )
+
+        m = _RECALL_RE.search(response)
+        if m:
+            name = m.group(1).strip()
+            if name:
+                return RecallCommand(name=name)
 
         # CLICK_TEXT must be tried before CLICK so the CLICK regex doesn't
         # mistakenly match prose inside a CLICK_TEXT label.

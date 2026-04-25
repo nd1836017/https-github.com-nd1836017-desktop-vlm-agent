@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +40,9 @@ from .parser import (
     ClickTextCommand,
     DownloadCommand,
     PauseCommand,
+    RecallCommand,
+    RememberCommand,
+    TypeCommand,
     parse_command,
 )
 from .screen import (
@@ -47,9 +51,16 @@ from .screen import (
     capture_screenshot,
     crop_around,
     detect_geometry,
+    image_signature,
 )
 from .state import AgentState, load_state, save_state
 from .tasks_loader import TasksLoadError, TaskStep, load_steps, load_tasks
+from .variables import (
+    UnknownVariableError,
+    VariableStore,
+    substitute_variables,
+    text_uses_variables,
+)
 from .vlm import GeminiClient, VerificationResult
 
 
@@ -239,6 +250,99 @@ def _execute_click_text(
     return True, action_text
 
 
+def _execute_remember(
+    *,
+    cmd: RememberCommand,
+    screenshot,
+    vlm: GeminiClient,
+    variables: VariableStore,
+    step_text: str,
+) -> tuple[bool, str]:
+    """Run a REMEMBER command. Returns ``(ok, action_text)``.
+
+    Two forms:
+      - ``REMEMBER [name = literal]`` — store ``literal`` directly.
+      - ``REMEMBER [name]`` — ask the VLM to extract the value of ``name``
+        from the current screen via ``GeminiClient.extract_value``.
+    """
+    if not cmd.name:
+        return False, "REMEMBER missing variable name"
+    if not cmd.from_screen:
+        # Literal form: deterministic, no VLM call.
+        try:
+            variables.set(cmd.name, cmd.literal_value)
+        except (ValueError, TypeError) as exc:
+            return False, f"REMEMBER [{cmd.name}] failed: {exc}"
+        return (
+            True,
+            f"REMEMBER [{cmd.name} = literal({len(cmd.literal_value)} chars)]",
+        )
+
+    # Screen-extract form: hand the planner's full step as a hint so the
+    # extractor picks up surrounding context (e.g. "the order ID at the
+    # top of the confirmation page"), but pass the bare variable name as
+    # the primary identifier.
+    hint = step_text.strip() if step_text else ""
+    try:
+        result = vlm.extract_value(cmd.name, screenshot, hint=hint)
+    except Exception as exc:  # pragma: no cover - defensive
+        # extract_value already retries on 5xx via _call_with_retry; if
+        # we get here it's a genuine error worth surfacing as a FAIL.
+        return False, f"REMEMBER [{cmd.name}] extract_value error: {exc}"
+    if not result.found or not result.value:
+        return (
+            False,
+            f"REMEMBER [{cmd.name}] — value not found on screen",
+        )
+    try:
+        variables.set(cmd.name, result.value)
+    except (ValueError, TypeError) as exc:
+        return False, f"REMEMBER [{cmd.name}] store failed: {exc}"
+    return (
+        True,
+        f"REMEMBER [{cmd.name}] = <extracted {len(result.value)} chars>",
+    )
+
+
+def _execute_recall(
+    *,
+    cmd: RecallCommand,
+    geometry: ScreenGeometry,
+    variables: VariableStore,
+    animation_buffer: float,
+    type_min_interval: float,
+    type_max_interval: float,
+    log_redact_type: bool,
+) -> tuple[bool, str]:
+    """Run a RECALL command by typing the stored value into the focused field.
+
+    Equivalent to ``TYPE [<value>]`` but more explicit. If the variable
+    is unset we fail loudly so the replan loop can recover.
+    """
+    if not cmd.name:
+        return False, "RECALL missing variable name"
+    if cmd.name not in variables:
+        return (
+            False,
+            f"RECALL [{cmd.name}] — variable is unset (available: "
+            f"{', '.join(sorted(variables.names())) or '(none)'})",
+        )
+    value = variables.get(cmd.name)
+    synthetic = TypeCommand(text=value)
+    execute(
+        synthetic,
+        geometry,
+        animation_buffer_seconds=animation_buffer,
+        type_min_interval_seconds=type_min_interval,
+        type_max_interval_seconds=type_max_interval,
+        log_redact_type=log_redact_type,
+    )
+    return (
+        True,
+        f"RECALL [{cmd.name}] -> typed {len(value)} chars",
+    )
+
+
 def _attempt_step(
     step: str,
     vlm: GeminiClient,
@@ -259,6 +363,7 @@ def _attempt_step(
     workspace: FileWorkspace | None = None,
     step_idx: int = 0,
     extra_images: list[bytes] | None = None,
+    variables: VariableStore | None = None,
 ) -> tuple[VerificationResult | PauseRequested, str]:
     """Run one plan/execute/verify attempt and return (verdict, action_text).
 
@@ -349,6 +454,63 @@ def _attempt_step(
                     log.warning(
                         "Failed to capture post-action screenshot for "
                         "file command on step %d: %s",
+                        step_idx,
+                        exc,
+                    )
+                artifact_writer.save_plan(step_idx, raw, action_text)
+                artifact_writer.save_verdict(step_idx, ok, action_text)
+            return (
+                VerificationResult(passed=ok, reason=action_text),
+                action_text,
+            )
+
+        # Memory primitives: REMEMBER stores a value into the run's
+        # VariableStore; RECALL types a stored value into the focused field
+        # (executed as a synthetic TYPE so it benefits from the standard
+        # animation buffer + redaction). Like the file-command path we
+        # synthesize PASS/FAIL based on the operation succeeding rather
+        # than calling the visual verifier — REMEMBER doesn't change the
+        # screen and RECALL's effect is just text appearing in a textbox,
+        # which is verified by the next step.
+        if isinstance(cmd, (RememberCommand, RecallCommand)):
+            if variables is None:
+                return (
+                    VerificationResult(
+                        passed=False,
+                        reason=(
+                            "Internal error: memory command emitted but no "
+                            "VariableStore was set up for this run."
+                        ),
+                    ),
+                    f"<{cmd.kind} blocked — no variable store>",
+                )
+            if isinstance(cmd, RememberCommand):
+                ok, action_text = _execute_remember(
+                    cmd=cmd,
+                    screenshot=screenshot,
+                    vlm=vlm,
+                    variables=variables,
+                    step_text=step,
+                )
+            else:
+                ok, action_text = _execute_recall(
+                    cmd=cmd,
+                    geometry=geometry,
+                    variables=variables,
+                    animation_buffer=animation_buffer,
+                    type_min_interval=type_min_interval_seconds,
+                    type_max_interval=type_max_interval_seconds,
+                    log_redact_type=log_redact_type,
+                )
+            log.info("Action: %s", action_text)
+            if artifact_writer is not None:
+                try:
+                    post_screenshot = capture_screenshot()
+                    artifact_writer.save_after(step_idx, post_screenshot)
+                except Exception as exc:  # pragma: no cover - defensive
+                    log.warning(
+                        "Failed to capture post-action screenshot for "
+                        "memory command on step %d: %s",
                         step_idx,
                         exc,
                     )
@@ -453,6 +615,9 @@ def run_step(
     workspace: FileWorkspace | None = None,
     step_idx: int = 0,
     pause_handler: Callable[[str], bool] | None = None,
+    variables: VariableStore | None = None,
+    step_timeout_seconds: float = 0.0,
+    stuck_step_threshold: int = 0,
 ) -> VerificationResult:
     """Run one step with up to `max_replans` replans on verify FAIL.
 
@@ -487,7 +652,34 @@ def run_step(
     # interventions; otherwise we're probably stuck in a PAUSE loop.
     max_pauses_per_step = 10
 
+    # Tier 4 reliability state: track a wall-clock deadline for the whole
+    # step and a rolling history of post-action screenshot fingerprints.
+    # When the same screen appears N times in a row, the agent is stuck
+    # and should fail fast instead of burning the whole replan budget on
+    # an unresponsive UI.
+    step_deadline: float | None = None
+    if step_timeout_seconds and step_timeout_seconds > 0:
+        step_deadline = time.monotonic() + step_timeout_seconds
+    recent_signatures: list[str] = []
+
     while attempts_used < total_attempts:
+        # Tier 4 — wall-clock timeout: if the user gave us a per-step budget
+        # and we've already spent it, stop here so the next step can run.
+        if step_deadline is not None and time.monotonic() >= step_deadline:
+            timeout = VerificationResult(
+                passed=False,
+                reason=(
+                    f"Step exceeded {step_timeout_seconds:.0f}s wall-clock "
+                    f"budget after {attempts_used} attempt(s). "
+                    f"Last failure: "
+                    f"{last_verdict.reason if last_verdict else 'n/a'}"
+                ),
+            )
+            log.error("%s", timeout.reason)
+            history.record(
+                step, last_action_text, passed=False, reason=timeout.reason
+            )
+            return timeout
         # `attempt_idx` is the 1-indexed number of the attempt we're about
         # to make (for logging / budget messages). The first attempt is
         # not a replan; attempts 2+ are.
@@ -557,6 +749,7 @@ def run_step(
             workspace=workspace,
             step_idx=step_idx,
             extra_images=extra_images,
+            variables=variables,
         )
 
         # PAUSE: ask the human, then loop back without consuming the
@@ -613,6 +806,43 @@ def run_step(
             total_attempts,
             verdict.reason,
         )
+
+        # Tier 4 — stuck-step detection: if the post-action screenshot
+        # looks identical to the previous N attempts on this step, our
+        # actions aren't moving the UI. Bail early instead of burning
+        # the rest of the replan budget on the same dead-end.
+        if stuck_step_threshold and stuck_step_threshold > 0:
+            try:
+                signature_img = capture_screenshot()
+                signature = image_signature(signature_img)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("stuck-step: screenshot signature failed: %s", exc)
+            else:
+                recent_signatures.append(signature)
+                # Keep the trailing window so memory doesn't grow.
+                if len(recent_signatures) > stuck_step_threshold:
+                    recent_signatures = recent_signatures[-stuck_step_threshold:]
+                if (
+                    len(recent_signatures) >= stuck_step_threshold
+                    and len(set(recent_signatures)) == 1
+                ):
+                    stuck = VerificationResult(
+                        passed=False,
+                        reason=(
+                            f"Step appears stuck — last "
+                            f"{stuck_step_threshold} attempts produced "
+                            f"identical screen state. "
+                            f"Last failure: {verdict.reason}"
+                        ),
+                    )
+                    log.error("%s", stuck.reason)
+                    history.record(
+                        step,
+                        last_action_text,
+                        passed=False,
+                        reason=stuck.reason,
+                    )
+                    return stuck
 
     # Budget exhausted.
     final = last_verdict or VerificationResult(
@@ -671,6 +901,21 @@ def run(
             f" (workdir={workspace.root})" if workspace.root else "",
         )
 
+    # Variable store: gated on tasks-file feature inspection so a simple
+    # "press Win, type Notepad" run never sets one up. When the user
+    # resumes from a checkpoint, the store is rehydrated from the
+    # serialized snapshot so values learned before the crash survive.
+    variables: VariableStore | None = None
+    if features.uses_variables:
+        variables = VariableStore()
+        log.info(
+            "Variable store enabled "
+            "(REMEMBER=%d, RECALL=%d, {{var.*}}=%d)",
+            features.remember_count,
+            features.recall_count,
+            features.var_placeholder_count,
+        )
+
     # Checkpoint handling.
     existing_state = load_state(config.state_file) if resume else None
     start_idx = 1
@@ -688,6 +933,17 @@ def run(
                 config.state_file,
             )
             state = existing_state
+            # Rehydrate variables from the checkpoint when this run uses
+            # them. Skipping the rehydrate when ``features.uses_variables``
+            # is False keeps the unused store empty + drops any stale
+            # entries that no longer correspond to a REMEMBER step.
+            if variables is not None and existing_state.variables:
+                variables = VariableStore.from_dict(existing_state.variables)
+                log.info(
+                    "Restored %d variable(s) from checkpoint: %s",
+                    len(variables),
+                    variables.summary(),
+                )
         else:
             log.warning(
                 "Ignoring stale checkpoint at %s (tasks file or step count changed).",
@@ -731,6 +987,26 @@ def run(
         for idx in range(start_idx, len(steps) + 1):
             task_step: TaskStep = steps[idx - 1]
             step_text = task_step.text
+            # Substitute ``{{var.<name>}}`` placeholders just before
+            # running the step, NOT at load time — variables are populated
+            # as the run progresses, and a step further down may reference
+            # one set by a step above. This is intentionally separate from
+            # the ``{{row.<field>}}`` substitution which IS done at load
+            # time (the CSV is fully known up-front).
+            if variables is not None and text_uses_variables(step_text):
+                try:
+                    step_text = substitute_variables(step_text, variables)
+                except UnknownVariableError as exc:
+                    msg = (
+                        f"\n[!] HALT at step {idx}/{len(steps)}: "
+                        f"unresolved variable in step text: {exc}\n"
+                        f"    Step: {task_step.text}\n"
+                        f"    Add a REMEMBER step before this one, or "
+                        f"provide a default like {{{{var.name|default}}}}.\n"
+                    )
+                    print(msg, file=sys.stderr)
+                    log.error("Unresolved variable: %s", exc)
+                    return 1
             log.info("=" * 60)
             if task_step.row_index is not None:
                 log.info(
@@ -770,6 +1046,9 @@ def run(
                 artifact_writer=artifact_writer,
                 workspace=workspace,
                 step_idx=idx,
+                variables=variables,
+                step_timeout_seconds=config.step_timeout_seconds,
+                stuck_step_threshold=config.stuck_step_threshold,
             )
 
             # action_text is resolved inside the writer from the most recent
@@ -793,8 +1072,13 @@ def run(
                 log.error("Halting execution: %s", result.reason)
                 return 1
 
-            # Commit progress to disk before moving on.
+            # Commit progress to disk before moving on. Snapshot the
+            # variable store too so a resume can pick up where we left
+            # off — not just on which step number, but with the values
+            # learned from REMEMBER calls so far.
             state = state.advance()
+            if variables is not None:
+                state = state.with_variables(variables.to_dict())
             try:
                 save_state(config.state_file, state)
             except OSError as exc:

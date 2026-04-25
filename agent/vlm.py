@@ -687,41 +687,56 @@ class GeminiClient:
             )
         parts.append(f"Current step: {step}")
 
-        # Smart-screenshot Layer 2: identical-frame skip. When the
-        # current screenshot fingerprints identically to the one we sent
-        # the planner on the previous step (e.g. a click that didn't
-        # visibly do anything), we drop the image from the request and
-        # tell the planner so in plain text. The planner already sees
-        # the recent step history, so it has enough context to decide
-        # what to do next without paying for a fresh vision pass.
+        # Smart-screenshot Layer 2: identical-frame skip. When we are
+        # *replanning* on the same step (i.e. the previous attempt
+        # FAILed and the planner is being called again) AND the
+        # current screenshot fingerprints identically to the one the
+        # planner just saw, drop the image from the request and tell
+        # the planner so in plain text. The previous attempt's history
+        # entry already gives it enough context to pick a *different*
+        # action without paying for a fresh vision pass.
         #
+        # Critical: this is gated on ``previous_failure`` because the
+        # tracker is per-client (lives for the whole run), so without
+        # the gate it could fire across step boundaries — the first
+        # plan_action call of a new step would arrive with the stale
+        # signature from the *previous* step, drop the image, and
+        # mislead the planner with a "last action didn't change the
+        # UI" message that's outright wrong for a fresh goal.
+        #
+        # Opt-in via VLM_SKIP_IDENTICAL_FRAMES; off by default.
         # Only applies to plan_action (not verify / disambiguate /
-        # refine, which are checking specific visual states). Opt-in
-        # via VLM_SKIP_IDENTICAL_FRAMES; off by default.
+        # refine, which check specific visual states).
         send_screenshot = True
         try:
             current_signature = image_signature(screenshot)
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("image_signature failed; sending screenshot: %s", exc)
             current_signature = None
+        is_replan = bool(previous_failure)
         if (
             self._skip_identical_frames
+            and is_replan
             and current_signature is not None
             and self._last_planner_signature == current_signature
         ):
             send_screenshot = False
             parts.append(
-                "[The screen looks IDENTICAL to the screenshot you saw on the "
-                "previous step. The last action did not visibly change the UI. "
-                "Pick a DIFFERENT action this time.]"
+                "[The screen looks IDENTICAL to the screenshot from your "
+                "previous attempt on this step. The last action did not "
+                "visibly change the UI. Pick a DIFFERENT action this time.]"
             )
             log.info(
                 "plan_action: skipping screenshot — identical signature %s",
                 current_signature[:8],
             )
-        # Update the tracker BEFORE the call so consecutive identical
-        # frames keep skipping; reset on any change.
+        # Update the tracker before the call so consecutive identical
+        # replan attempts keep skipping. Reset on a fresh step
+        # (previous_failure == "") so a stale per-run signature can't
+        # leak into a new goal's first plan call.
         if current_signature is not None:
+            if not is_replan:
+                self._last_planner_signature = None
             self._last_planner_signature = current_signature
 
         # Decode any feed-buffer bytes into PIL Images alongside the live

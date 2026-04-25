@@ -210,7 +210,8 @@ def test_first_plan_call_always_sends_screenshot_even_when_skip_enabled():
     assert _count_image_parts(contents) == 1
 
 
-def test_identical_consecutive_screenshots_are_dropped_when_flag_on():
+def test_identical_consecutive_replan_screenshots_are_dropped_when_flag_on():
+    """During a replan on the same step, an identical screen drops the image."""
     with mock.patch("agent.vlm.genai.Client"):
         client = GeminiClient(
             api_key="fake",
@@ -221,8 +222,11 @@ def test_identical_consecutive_screenshots_are_dropped_when_flag_on():
     sdk = _stub_plan_response(client)
 
     img = _make_image(1280, 720)
-    client.plan_action("step 1", img)
-    client.plan_action("step 2", img)
+    client.plan_action("press the button", img)
+    # Replan on the same step: previous_failure is non-empty.
+    client.plan_action(
+        "press the button", img, previous_failure="nothing happened"
+    )
 
     second_call_contents = sdk.call_args_list[-1].kwargs["contents"]
     # Screenshot was dropped on the second call.
@@ -230,6 +234,35 @@ def test_identical_consecutive_screenshots_are_dropped_when_flag_on():
     # And the planner was told why.
     prompt = second_call_contents[0]
     assert "IDENTICAL" in prompt
+
+
+def test_identical_screen_on_fresh_step_is_not_dropped():
+    """Across step boundaries — i.e. plan_action without previous_failure —
+    even if the screen happens to fingerprint the same as the last call,
+    we MUST send the image. Otherwise the planner gets zero visual
+    context for the new goal and a bogus "last action didn't change the
+    UI" message.
+    """
+    with mock.patch("agent.vlm.genai.Client"):
+        client = GeminiClient(
+            api_key="fake",
+            model_name="fake-model",
+            enable_json_output=True,
+            skip_identical_frames=True,
+        )
+    sdk = _stub_plan_response(client)
+
+    img = _make_image(1280, 720)
+    # First step: a TYPE in a small field that doesn't perceptibly
+    # change the 16x16 fingerprint.
+    client.plan_action("type a name", img)
+    # Different step, same screenshot — must NOT skip.
+    client.plan_action("press Enter", img)
+
+    second_call_contents = sdk.call_args_list[-1].kwargs["contents"]
+    assert _count_image_parts(second_call_contents) == 1
+    prompt = second_call_contents[0]
+    assert "IDENTICAL" not in prompt
 
 
 def test_changed_screenshot_is_not_dropped():

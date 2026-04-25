@@ -1,8 +1,10 @@
 """Tests for ``agent.files``: workspace, modes, naming, feature inspection."""
 from __future__ import annotations
 
+import sys
 import urllib.error
 from pathlib import Path
+from unittest import mock
 from unittest.mock import MagicMock
 
 import pytest
@@ -241,15 +243,66 @@ def test_execute_attach_file_uses_workspace_files(tmp_path: Path) -> None:
     target.write_bytes(b"x")
 
     fake_pyautogui = MagicMock()
-    ok, action = execute_attach_file(
-        AttachFileCommand(filename="spec.pdf"),
-        ws,
-        pyautogui_module=fake_pyautogui,
-        sleep=lambda _s: None,
-    )
+    with mock.patch("pyperclip.copy") as fake_copy:
+        ok, action = execute_attach_file(
+            AttachFileCommand(filename="spec.pdf"),
+            ws,
+            pyautogui_module=fake_pyautogui,
+            sleep=lambda _s: None,
+        )
     assert ok is True
     assert str(target) in action
-    fake_pyautogui.hotkey.assert_called_with("ctrl", "l")
+    # Path is pasted via clipboard, not typewrite — protects non-ASCII paths.
+    fake_copy.assert_called_once_with(str(target))
+    # Two hotkey calls: ctrl+l (focus path bar) then ctrl+v (paste).
+    fake_pyautogui.hotkey.assert_any_call("ctrl", "l")
+    fake_pyautogui.hotkey.assert_any_call("ctrl", "v")
+    fake_pyautogui.typewrite.assert_not_called()
+    fake_pyautogui.press.assert_called_with("enter")
+
+
+def test_execute_attach_file_pastes_non_ascii_path(tmp_path: Path) -> None:
+    """Non-ASCII path components must reach the dialog intact (not via typewrite)."""
+    ws = FileWorkspace.create(mode=FileMode.SAVE, workdir=tmp_path)
+    target = tmp_path / "café.pdf"
+    target.write_bytes(b"x")
+
+    fake_pyautogui = MagicMock()
+    with mock.patch("pyperclip.copy") as fake_copy:
+        ok, action = execute_attach_file(
+            AttachFileCommand(filename="café.pdf"),
+            ws,
+            pyautogui_module=fake_pyautogui,
+            sleep=lambda _s: None,
+        )
+    assert ok is True
+    assert "café.pdf" in action
+    # The full unicode path is on the clipboard verbatim.
+    pasted = fake_copy.call_args.args[0]
+    assert pasted.endswith("café.pdf")
+    # typewrite (which would silently strip the é) must NOT have been called.
+    fake_pyautogui.typewrite.assert_not_called()
+
+
+def test_execute_attach_file_falls_back_to_typewrite_when_pyperclip_missing(
+    tmp_path: Path,
+) -> None:
+    """When pyperclip can't be imported, ATTACH_FILE warns and uses typewrite."""
+    ws = FileWorkspace.create(mode=FileMode.SAVE, workdir=tmp_path)
+    target = tmp_path / "ascii.pdf"
+    target.write_bytes(b"x")
+
+    fake_pyautogui = MagicMock()
+    # Force ImportError when files.py tries `import pyperclip`.
+    with mock.patch.dict(sys.modules, {"pyperclip": None}):
+        ok, action = execute_attach_file(
+            AttachFileCommand(filename="ascii.pdf"),
+            ws,
+            pyautogui_module=fake_pyautogui,
+            sleep=lambda _s: None,
+        )
+    assert ok is True
+    assert str(target) in action
     fake_pyautogui.typewrite.assert_called_once()
     fake_pyautogui.press.assert_called_with("enter")
 

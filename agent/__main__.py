@@ -91,7 +91,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
         config = Config.load()
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
+        # ValueError covers FILE_MODE / RPD threshold validation; RuntimeError
+        # covers missing/blank GEMINI_API_KEY etc. Both surface as "[config error]".
         print(f"[config error] {exc}", file=sys.stderr)
         return 2
 

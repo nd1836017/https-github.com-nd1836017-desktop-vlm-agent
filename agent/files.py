@@ -476,12 +476,42 @@ def execute_attach_file(
     pyautogui = pyautogui_module if pyautogui_module is not None else _import_pyautogui()
     pyautogui.hotkey("ctrl", "l")
     (sleep or time.sleep)(0.4)
-    # typewrite is fine here: file paths are ASCII on Windows + Linux dialogs.
-    pyautogui.typewrite(str(resolved), interval=0.01)
+    # File paths can legitimately contain non-ASCII (e.g. café.pdf or a
+    # download whose Content-Disposition declares a CJK filename). pyautogui
+    # typewrite silently drops anything with ord>127, so we always paste the
+    # full path via the clipboard. Falls back to typewrite (ASCII-only) if
+    # pyperclip isn't installed or the clipboard call fails — better to fail
+    # the attach loudly than to clobber the dialog with a half-typed path.
+    path_str = str(resolved)
+    if not _paste_path_via_clipboard(pyautogui, path_str):
+        log.warning(
+            "ATTACH_FILE: clipboard paste unavailable; falling back to "
+            "typewrite — non-ASCII characters in %r will be dropped.",
+            path_str,
+        )
+        pyautogui.typewrite(path_str, interval=0.01)
     (sleep or time.sleep)(0.2)
     pyautogui.press("enter")
     (sleep or time.sleep)(0.6)
     return True, f"ATTACH_FILE {resolved}"
+
+
+def _paste_path_via_clipboard(pyautogui_module, text: str) -> bool:
+    """Copy ``text`` to the clipboard and Ctrl+V it.
+
+    Returns True on success, False if pyperclip isn't installed or the
+    clipboard call raised — in which case the caller should fall back.
+    """
+    try:
+        import pyperclip
+    except ImportError:
+        return False
+    try:
+        pyperclip.copy(text)
+    except pyperclip.PyperclipException:
+        return False
+    pyautogui_module.hotkey("ctrl", "v")
+    return True
 
 
 def _resolve_attach_path(candidate: str, workspace: FileWorkspace) -> Path | None:

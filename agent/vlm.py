@@ -730,13 +730,12 @@ class GeminiClient:
                 "plan_action: skipping screenshot — identical signature %s",
                 current_signature[:8],
             )
-        # Update the tracker before the call so consecutive identical
-        # replan attempts keep skipping. Reset on a fresh step
-        # (previous_failure == "") so a stale per-run signature can't
-        # leak into a new goal's first plan call.
+        # Update the tracker so consecutive identical replan attempts
+        # keep skipping. The skip condition above already requires
+        # ``is_replan``, so a stale per-run signature can never leak
+        # into a fresh step's first plan call regardless of what we
+        # store here.
         if current_signature is not None:
-            if not is_replan:
-                self._last_planner_signature = None
             self._last_planner_signature = current_signature
 
         # Decode any feed-buffer bytes into PIL Images alongside the live

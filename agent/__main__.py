@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import sys
+from pathlib import Path
 
 from .agent import run
 from .config import Config, configure_logging
@@ -21,6 +22,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--reset",
         action="store_true",
         help="Delete the checkpoint file before running (ignored with --resume).",
+    )
+    p.add_argument(
+        "--csv",
+        dest="csv_override",
+        default=None,
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Override the CSV path used by every FOR_EACH_ROW block in the "
+            "tasks file. Useful for swapping demo data for real data without "
+            "editing tasks.txt."
+        ),
     )
     # Two-stage CLICK toggle. Mutually exclusive; if neither is given, we fall
     # back to the .env / ENABLE_TWO_STAGE_CLICK value.
@@ -65,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.reset and not args.resume:
         reset_state(config.state_file)
 
-    return run(config, resume=args.resume)
+    return run(config, resume=args.resume, csv_override=args.csv_override)
 
 
 if __name__ == "__main__":

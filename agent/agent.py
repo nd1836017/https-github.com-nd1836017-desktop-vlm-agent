@@ -31,6 +31,7 @@ from .screen import (
     detect_geometry,
 )
 from .state import AgentState, load_state, save_state
+from .tasks_loader import TasksLoadError, load_tasks
 from .vlm import GeminiClient, VerificationResult
 
 
@@ -99,16 +100,13 @@ def _handle_pause(reason: str) -> bool:
     return answer != "q"
 
 
-def read_tasks(path: Path) -> list[str]:
-    if not path.exists():
-        raise FileNotFoundError(f"Tasks file not found: {path}")
-    steps: list[str] = []
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        steps.append(line)
-    return steps
+def read_tasks(path: Path, csv_override: Path | None = None) -> list[str]:
+    """Load and expand a tasks file (delegates to ``tasks_loader.load_tasks``).
+
+    Kept as a thin wrapper for backwards compatibility — earlier code/tests
+    imported ``read_tasks`` directly from ``agent.agent``.
+    """
+    return load_tasks(path, csv_override=csv_override)
 
 
 def _execute_click_two_stage(
@@ -517,8 +515,17 @@ def run_step(
     return final
 
 
-def run(config: Config, resume: bool = False) -> int:
-    steps = read_tasks(config.tasks_file)
+def run(
+    config: Config,
+    resume: bool = False,
+    csv_override: Path | None = None,
+) -> int:
+    try:
+        steps = read_tasks(config.tasks_file, csv_override=csv_override)
+    except TasksLoadError as exc:
+        log.error("Failed to load tasks file %s: %s", config.tasks_file, exc)
+        print(f"[tasks error] {exc}", file=sys.stderr)
+        return 2
     if not steps:
         log.error("No steps found in %s", config.tasks_file)
         return 2

@@ -153,6 +153,7 @@ python -m agent --reset
 
 - **Visual-Action Loop** — screenshot → VLM plan → parse → `pyautogui` execute → screenshot → VLM verify.
 - **Rich command set** — `CLICK` / `DOUBLE_CLICK` / `RIGHT_CLICK` / `MOVE_TO`, `CLICK_TEXT` (OCR-anchored), `PRESS`, `TYPE` (clipboard-based for Unicode), `SCROLL`, `DRAG`, `WAIT`, `PAUSE`.
+- **CSV-driven loops** — `FOR_EACH_ROW [data.csv]` … `END_FOR_EACH_ROW` repeats a block per row with `{{row.<field>}}` substitution. See [CSV-driven loops](#csv-driven-loops).
 - **Two-stage CLICK** — after a coarse coordinate, the agent crops around the target and asks the VLM to refine + disambiguate. Cuts misclicks dramatically.
 - **Normalized grid** — VLM emits coordinates on a 0–1000 grid; agent auto-detects native resolution and maps to pixels.
 - **Short-term memory + replan** — rolling window of recent (step, action, verdict) rows fed back into the planner; on verifier FAIL the agent replans up to a configurable budget before halting.
@@ -236,6 +237,42 @@ Type "https://example.com" and press Enter
 
 Instructions are free-form English. The agent is not parsing them directly — it feeds them to Gemini as goals, one at a time, and Gemini emits concrete commands.
 
+### CSV-driven loops
+
+For repetitive work — filling a form once per row, sending bulk emails, etc. — wrap a block of steps in `FOR_EACH_ROW [data.csv]` … `END_FOR_EACH_ROW` and use `{{row.<field>}}` placeholders to pull values from the CSV header:
+
+```
+# open the form once
+Open Chrome
+Click the address bar
+Type "https://example.com/contact" and press Enter
+
+FOR_EACH_ROW [data.csv]
+    Click the "First name" field
+    Type "{{row.first_name}}"
+    Click the "Email" field
+    Type "{{row.email}}"
+    Click the "Message" field
+    Type "{{row.message|Hello!}}"   # default value if cell is empty
+    Click Submit
+END_FOR_EACH_ROW
+```
+
+With a CSV like:
+
+```
+first_name,email,message
+Alice,alice@example.com,Following up on our chat
+Bob,bob@example.com,
+```
+
+the block above runs the inner steps twice — once with Alice's row, once with Bob's. Empty cells fall back to the `|default` value (`Hello!` here for Bob's missing message).
+
+- Field names match the CSV header **exactly** (case-sensitive).
+- The CSV path is resolved relative to the tasks file (or override at runtime with `python -m agent --csv real_data.csv`).
+- Nesting `FOR_EACH_ROW` is not supported.
+- A working example is in [`examples/tasks_csv_demo.txt`](./examples/tasks_csv_demo.txt) + [`examples/data_demo.csv`](./examples/data_demo.csv).
+
 ---
 
 ## Run
@@ -244,6 +281,7 @@ Instructions are free-form English. The agent is not parsing them directly — i
 python -m agent                # run from tasks.txt (fresh or continued from checkpoint)
 python -m agent --resume       # force resume from last verified step
 python -m agent --reset        # delete checkpoint and start fresh
+python -m agent --csv data.csv # override the FOR_EACH_ROW data file at runtime
 python -m agent --two-stage-click     # force two-stage CLICK on (overrides .env)
 python -m agent --no-two-stage-click  # force two-stage CLICK off (faster, less safe)
 ```
@@ -331,7 +369,11 @@ desktop-vlm-agent/
 │   ├── parser.py        # command parser (regex + JSON, lenient)
 │   ├── screen.py        # screenshot + 0-1000 ↔ pixel scaling + overlays
 │   ├── state.py         # checkpoint file (atomic writes)
+│   ├── tasks_loader.py  # tasks.txt parser + FOR_EACH_ROW + CSV templating
 │   └── vlm.py           # Gemini client (plan + verify + retry)
+├── examples/
+│   ├── tasks_csv_demo.txt
+│   └── data_demo.csv
 ├── scripts/
 │   └── launch-chrome.sh # persistent-profile Chrome launcher (Linux)
 ├── tests/               # pytest unit tests

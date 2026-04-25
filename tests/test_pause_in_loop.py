@@ -28,7 +28,7 @@ class _FakeClient:
         self.plan_calls = 0
         self.verify_calls = 0
 
-    def plan_action(self, step, screenshot, history_summary="", previous_failure=""):
+    def plan_action(self, step, screenshot, history_summary="", previous_failure="", extra_images=None):
         self.plan_calls += 1
         out = self._plans.pop(0)
         return (out, None) if not isinstance(out, tuple) else out

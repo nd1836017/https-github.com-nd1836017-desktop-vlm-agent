@@ -4,6 +4,7 @@ Uses the modern `google-genai` SDK (`pip install google-genai`).
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 import random
@@ -414,6 +415,7 @@ class GeminiClient:
         screenshot: Image.Image,
         history_summary: str = "",
         previous_failure: str = "",
+        extra_images: list[bytes] | None = None,
     ) -> tuple[str, Command | None]:
         """Ask the VLM what action to take for the given step.
 
@@ -427,6 +429,12 @@ class GeminiClient:
         (step, action, verdict) records. `previous_failure` is set when we
         are replanning after a verifier FAIL on this same step — in that
         case the VLM should pick a DIFFERENT action.
+
+        `extra_images` are bytes of additional images (PNG/JPEG) to feed
+        the planner alongside the current screenshot. CAPTURE_FOR_AI and
+        FEED-mode DOWNLOAD push bytes into the workspace's feed buffer;
+        the caller drains that buffer and passes it here so the planner
+        can see those images on its NEXT call.
         """
         parts: list[str] = []
         if history_summary:
@@ -439,7 +447,27 @@ class GeminiClient:
                 f"  {previous_failure}\n"
                 "Pick a DIFFERENT action this time."
             )
+        if extra_images:
+            parts.append(
+                f"You also have {len(extra_images)} attached image(s) provided "
+                "by the previous step (CAPTURE_FOR_AI / FEED). Use them as "
+                "additional context."
+            )
         parts.append(f"Current step: {step}")
+
+        # Decode any feed-buffer bytes into PIL Images alongside the live
+        # screenshot. Bad bytes are skipped with a warning so a single
+        # corrupt capture doesn't poison the whole call.
+        attached_images: list[Image.Image] = []
+        for blob in extra_images or []:
+            try:
+                attached_images.append(Image.open(io.BytesIO(blob)))
+            except (OSError, ValueError) as exc:
+                log.warning(
+                    "plan_action: dropping unreadable extra image (%d bytes): %s",
+                    len(blob),
+                    exc,
+                )
 
         if self._enable_json_output:
             parts.append(
@@ -448,7 +476,7 @@ class GeminiClient:
             prompt = "\n\n".join(parts)
             response = self._generate(
                 "plan_action_json",
-                [prompt, screenshot],
+                [prompt, screenshot, *attached_images],
                 self._action_config_json,
             )
             text = (response.text or "").strip()
@@ -484,7 +512,11 @@ class GeminiClient:
 
         parts.append("Respond with ONE command only.")
         prompt = "\n\n".join(parts)
-        response = self._generate("plan_action", [prompt, screenshot], self._action_config)
+        response = self._generate(
+            "plan_action",
+            [prompt, screenshot, *attached_images],
+            self._action_config,
+        )
         text = (response.text or "").strip()
         log.debug("plan_action response: %r", text)
         return text, None

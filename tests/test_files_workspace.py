@@ -331,7 +331,7 @@ def test_inspect_features_detects_file_primitives() -> None:
         TaskStep(text="DOWNLOAD [https://x/foo.pdf, foo.pdf]"),
         TaskStep(text="DOWNLOAD [https://y/bar.pdf]"),
         TaskStep(text="ATTACH_FILE [foo.pdf]"),
-        TaskStep(text="CAPTURE_FOR_AI"),
+        TaskStep(text="CAPTURE_FOR_AI []"),
     ]
     f = inspect_features(steps)
     assert f.uses_downloads is True

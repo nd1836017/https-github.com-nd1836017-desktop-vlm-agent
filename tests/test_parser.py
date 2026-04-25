@@ -275,12 +275,25 @@ def test_parse_attach_file_with_space_alias():
     assert cmd.filename == "resume.docx"
 
 
-def test_parse_capture_for_ai_no_filename():
+def test_parse_capture_for_ai_empty_brackets():
     from agent.parser import CaptureForAiCommand
 
-    cmd = parse_command("CAPTURE_FOR_AI")
+    cmd = parse_command("CAPTURE_FOR_AI []")
     assert isinstance(cmd, CaptureForAiCommand)
     assert cmd.filename == ""
+
+
+def test_parse_capture_for_ai_requires_brackets():
+    # Bare CAPTURE_FOR_AI without brackets MUST NOT match — otherwise
+    # prose like "to capture for AI analysis, CLICK [500,300]" would
+    # silently win and shadow the real CLICK command.
+    cmd = parse_command(
+        "Going to CLICK [500,300] so we can capture for AI later."
+    )
+    from agent.parser import ClickCommand
+
+    assert isinstance(cmd, ClickCommand)
+    assert (cmd.x, cmd.y) == (500, 300)
 
 
 def test_parse_capture_for_ai_with_filename():

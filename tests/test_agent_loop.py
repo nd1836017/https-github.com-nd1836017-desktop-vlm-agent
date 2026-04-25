@@ -38,12 +38,14 @@ class FakeClient:
         screenshot,
         history_summary: str = "",
         previous_failure: str = "",
+        extra_images=None,
     ):
         self.plan_calls.append(
             {
                 "step": step,
                 "history_summary": history_summary,
                 "previous_failure": previous_failure,
+                "extra_images": list(extra_images or []),
             }
         )
         out = self._plan_outputs.pop(0)
@@ -408,3 +410,43 @@ def test_run_returns_exit_code_2_when_tasks_file_missing(tmp_path, capsys):
     captured = capsys.readouterr()
     assert "[tasks error]" in captured.err
     assert "does-not-exist.txt" in captured.err
+
+
+# -----------------------------------------------------------------------------
+# CAPTURE_FOR_AI / FEED-mode wiring: verify consume_feed() → plan_action.
+# -----------------------------------------------------------------------------
+def test_capture_for_ai_feeds_next_plan_call(tmp_path, fake_geometry):
+    """A CAPTURE_FOR_AI step must drain the feed buffer into the next
+    plan_action call's ``extra_images``. Regression test for Devin Review
+    finding that the buffer was populated but never consumed.
+    """
+    from agent.files import FileMode
+
+    tasks_text = "CAPTURE_FOR_AI []\nClick the OK button\n"
+    cfg = _cfg(tmp_path, tasks_text, file_mode=FileMode.FEED, workdir=None)
+
+    client = FakeClient(
+        plan_outputs=[
+            "CAPTURE_FOR_AI []",  # step 1: emit the capture command
+            "CLICK [500,500]",     # step 2: planner sees the captured image
+        ],
+        verify_outputs=[
+            # Step 1 (CAPTURE_FOR_AI) bypasses the verifier — synthesises
+            # its own verdict — so only step 2 needs a verify entry.
+            VerificationResult(passed=True, reason="PASS"),
+        ],
+    )
+    with (
+        mock.patch("agent.agent.GeminiClient", return_value=client),
+        mock.patch("agent.agent.detect_geometry", return_value=fake_geometry),
+    ):
+        exit_code = run(cfg)
+    assert exit_code == 0
+
+    # Two plan calls: step 1 (no images) and step 2 (1 image from buffer).
+    assert len(client.plan_calls) == 2
+    assert client.plan_calls[0]["extra_images"] == []
+    assert len(client.plan_calls[1]["extra_images"]) == 1, (
+        "step 2's plan_action should have been handed the screenshot bytes "
+        "buffered by step 1's CAPTURE_FOR_AI"
+    )

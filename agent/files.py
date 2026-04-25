@@ -581,7 +581,12 @@ class RunFeatures:
 # generally won't trigger these unless the user really did write them.
 _DOWNLOAD_HINT_RE = re.compile(r"\bDOWNLOAD\s*\[", re.IGNORECASE)
 _ATTACH_FILE_HINT_RE = re.compile(r"\bATTACH[_\s]?FILE\s*\[", re.IGNORECASE)
-_CAPTURE_FOR_AI_HINT_RE = re.compile(r"\bCAPTURE[_\s]?FOR[_\s]?AI\b", re.IGNORECASE)
+# Match the literal bracket form so prose mentions don't trigger workspace
+# setup. ``CAPTURE_FOR_AI []`` (empty arg = grab current screen) and
+# ``CAPTURE_FOR_AI [foo.png]`` both match.
+_CAPTURE_FOR_AI_HINT_RE = re.compile(
+    r"\bCAPTURE[_\s]?FOR[_\s]?AI\s*\[", re.IGNORECASE
+)
 
 
 def inspect_features(steps) -> RunFeatures:

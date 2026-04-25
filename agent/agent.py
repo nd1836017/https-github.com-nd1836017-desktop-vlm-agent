@@ -272,11 +272,16 @@ def _attempt_step(
         screenshot = capture_screenshot()
         if artifact_writer is not None:
             artifact_writer.save_before(step_idx, screenshot)
+        # Drain any image bytes pushed by a prior CAPTURE_FOR_AI / FEED-mode
+        # DOWNLOAD so the planner can see them on this call. consume_feed
+        # is destructive — bytes are delivered exactly once.
+        extra_images = workspace.consume_feed() if workspace is not None else []
         raw, cmd = vlm.plan_action(
             step,
             screenshot,
             history_summary=history_summary,
             previous_failure=previous_failure,
+            extra_images=extra_images,
         )
         if cmd is None:
             # JSON-mode failed or disabled — fall back to regex parse.

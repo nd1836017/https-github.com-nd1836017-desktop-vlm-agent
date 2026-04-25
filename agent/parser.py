@@ -242,10 +242,11 @@ _ATTACH_FILE_RE = re.compile(
     r"ATTACH[_\s]?FILE\s*\[\s*(.+?)\s*\]",
     re.IGNORECASE,
 )
-# CAPTURE_FOR_AI is unique among primitives in that the bracket arg is
-# fully optional — capturing the current screenshot is the common case.
+# CAPTURE_FOR_AI ALWAYS requires brackets so the parser doesn't accidentally
+# match prose like "...to capture for AI analysis, click here". The contents
+# may be empty (``CAPTURE_FOR_AI []`` = grab the current screen).
 _CAPTURE_FOR_AI_RE = re.compile(
-    r"CAPTURE[_\s]?FOR[_\s]?AI(?:\s*\[\s*(.*?)\s*\])?",
+    r"CAPTURE[_\s]?FOR[_\s]?AI\s*\[\s*(.*?)\s*\]",
     re.IGNORECASE,
 )
 

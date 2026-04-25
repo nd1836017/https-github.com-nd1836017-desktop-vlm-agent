@@ -522,7 +522,7 @@ def run(
 ) -> int:
     try:
         steps = read_tasks(config.tasks_file, csv_override=csv_override)
-    except TasksLoadError as exc:
+    except (TasksLoadError, FileNotFoundError) as exc:
         log.error("Failed to load tasks file %s: %s", config.tasks_file, exc)
         print(f"[tasks error] {exc}", file=sys.stderr)
         return 2

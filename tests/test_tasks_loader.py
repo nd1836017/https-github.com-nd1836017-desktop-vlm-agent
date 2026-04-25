@@ -108,6 +108,52 @@ def test_for_each_row_csv_override(tmp_path: Path) -> None:
     assert load_tasks(tasks, csv_override=other) == ["Use B", "Use C"]
 
 
+def test_csv_override_relative_resolves_against_cwd_not_tasks_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A relative ``--csv`` path is resolved against the user's CWD.
+
+    This is what users intuitively expect for one-off CLI overrides like
+    ``python -m agent --csv my_data.csv`` — they don't want it resolved
+    against the tasks file's parent directory (which may live in a
+    completely different tree).
+    """
+    tasks_dir = tmp_path / "workflows"
+    tasks_dir.mkdir()
+    cwd_dir = tmp_path / "cwd"
+    cwd_dir.mkdir()
+
+    # CSV in the tasks dir would shadow the right one if resolution were
+    # tasks-dir-relative — populate it with WRONG data so an incorrect fix
+    # would surface in the assertion.
+    _write(tasks_dir, "real.csv", "x\nWRONG\n")
+    # The CSV the user actually meant lives in their CWD.
+    _write(cwd_dir, "real.csv", "x\nRIGHT\n")
+    # Tasks file references some unrelated demo csv that we'll override.
+    _write(tasks_dir, "demo.csv", "x\nIGNORED\n")
+    tasks = _write(
+        tasks_dir,
+        "tasks.txt",
+        "FOR_EACH_ROW [demo.csv]\n  Use {{row.x}}\nEND_FOR_EACH_ROW\n",
+    )
+
+    monkeypatch.chdir(cwd_dir)
+    assert load_tasks(tasks, csv_override=Path("real.csv")) == ["Use RIGHT"]
+
+
+def test_csv_override_absolute_path_is_respected(tmp_path: Path) -> None:
+    other_dir = tmp_path / "elsewhere"
+    other_dir.mkdir()
+    other = _write(other_dir, "real.csv", "x\nABS\n")
+    tasks = _make_csv_pair(
+        tmp_path,
+        "x\nIGNORED\n",
+        "FOR_EACH_ROW [data.csv]\n  Use {{row.x}}\nEND_FOR_EACH_ROW\n",
+    )
+    assert load_tasks(tasks, csv_override=other) == ["Use ABS"]
+
+
 def test_default_value_is_used_when_cell_is_empty(tmp_path: Path) -> None:
     tasks = _make_csv_pair(
         tmp_path,

@@ -75,6 +75,13 @@ def load_tasks(
     if not path.exists():
         raise FileNotFoundError(f"Tasks file not found: {path}")
 
+    # CLI / API overrides are resolved against the user's current working
+    # directory (intuitive for one-off `--csv mydata.csv` invocations).
+    # In-file CSV paths are resolved against the tasks file's directory,
+    # which happens later inside _expand().
+    if csv_override is not None and not csv_override.is_absolute():
+        csv_override = csv_override.resolve()
+
     raw_text = path.read_text(encoding="utf-8-sig")
     lines = raw_text.splitlines()
     return _expand(lines, base_dir=path.parent, csv_override=csv_override)

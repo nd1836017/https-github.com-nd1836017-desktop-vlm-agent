@@ -8,6 +8,7 @@ display server.
 from __future__ import annotations
 
 import sys
+from dataclasses import replace as dataclasses_replace
 from typing import cast
 from unittest import mock
 
@@ -385,3 +386,23 @@ def test_resume_ignored_if_tasks_file_changed(
     assert exit_code == 0
     # All 3 steps must have been re-run from the top.
     assert len(client.plan_calls) == 3
+
+
+# -----------------------------------------------------------------------------
+# Graceful error handling when the tasks file is missing (regression test).
+# -----------------------------------------------------------------------------
+def test_run_returns_exit_code_2_when_tasks_file_missing(tmp_path, capsys):
+    """``run()`` must catch FileNotFoundError and exit cleanly.
+
+    Previously only ``TasksLoadError`` was caught, leaving the most common
+    failure mode (typo'd path) crashing with a raw traceback.
+    """
+    cfg = _cfg(tmp_path, "Step one\n")
+    # Point the tasks file at something that doesn't exist.
+    cfg = dataclasses_replace(cfg, tasks_file=tmp_path / "does-not-exist.txt")
+
+    exit_code = run(cfg)
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "[tasks error]" in captured.err
+    assert "does-not-exist.txt" in captured.err

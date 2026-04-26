@@ -606,6 +606,10 @@ class RunFeatures:
     remember_count: int = 0
     recall_count: int = 0
     var_placeholder_count: int = 0
+    uses_browser_fast_path: bool = False
+    browser_go_count: int = 0
+    browser_click_count: int = 0
+    browser_fill_count: int = 0
 
     @property
     def uses_files(self) -> bool:
@@ -640,6 +644,11 @@ _RECALL_HINT_RE = re.compile(
 _VAR_PLACEHOLDER_HINT_RE = re.compile(
     r"\{\{\s*var\.[A-Za-z_][\w]*"
 )
+# Browser-fast-path command hints. Match the literal bracket form so prose
+# mentions ("open the browser") never accidentally trip CDP setup.
+_BROWSER_GO_HINT_RE = re.compile(r"\bBROWSER[_\s]?GO\s*\[", re.IGNORECASE)
+_BROWSER_CLICK_HINT_RE = re.compile(r"\bBROWSER[_\s]?CLICK\s*\[", re.IGNORECASE)
+_BROWSER_FILL_HINT_RE = re.compile(r"\bBROWSER[_\s]?FILL\s*\[", re.IGNORECASE)
 
 
 def inspect_features(steps) -> RunFeatures:
@@ -660,6 +669,9 @@ def inspect_features(steps) -> RunFeatures:
     remember = 0
     recall = 0
     var_placeholder = 0
+    browser_go = 0
+    browser_click = 0
+    browser_fill = 0
 
     for step in steps:
         # Heuristic flags from natural-language text. We match the literal
@@ -677,6 +689,12 @@ def inspect_features(steps) -> RunFeatures:
             recall += 1
         if _VAR_PLACEHOLDER_HINT_RE.search(step.text):
             var_placeholder += 1
+        if _BROWSER_GO_HINT_RE.search(step.text):
+            browser_go += 1
+        if _BROWSER_CLICK_HINT_RE.search(step.text):
+            browser_click += 1
+        if _BROWSER_FILL_HINT_RE.search(step.text):
+            browser_fill += 1
         # Row metadata is set by the loader for every step expanded out
         # of a FOR_EACH_ROW block. ``csv_rows`` tracks the highest row
         # index seen (= number of CSV rows, since rows are 1-indexed and
@@ -706,6 +724,12 @@ def inspect_features(steps) -> RunFeatures:
         remember_count=remember,
         recall_count=recall,
         var_placeholder_count=var_placeholder,
+        uses_browser_fast_path=(
+            browser_go > 0 or browser_click > 0 or browser_fill > 0
+        ),
+        browser_go_count=browser_go,
+        browser_click_count=browser_click,
+        browser_fill_count=browser_fill,
     )
 
 
@@ -746,10 +770,17 @@ def format_features_summary(features: RunFeatures, *, total_steps: int) -> str:
         lines.append(
             f"  - {{{{var.*}}}} placeholders × {features.var_placeholder_count}"
         )
+    if features.browser_go_count:
+        lines.append(f"  - BROWSER_GO × {features.browser_go_count}")
+    if features.browser_click_count:
+        lines.append(f"  - BROWSER_CLICK × {features.browser_click_count}")
+    if features.browser_fill_count:
+        lines.append(f"  - BROWSER_FILL × {features.browser_fill_count}")
     if not (
         features.uses_csv_loop
         or features.uses_files
         or features.uses_variables
+        or features.uses_browser_fast_path
     ):
         lines.append("  - (no special features detected)")
     return "\n".join(lines)

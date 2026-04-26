@@ -23,6 +23,9 @@ from pydantic import BaseModel, Field, ValidationError
 from .cost import RpdGuard
 from .parser import (
     AttachFileCommand,
+    BrowserClickCommand,
+    BrowserFillCommand,
+    BrowserGoCommand,
     CaptureForAiCommand,
     ClickCommand,
     ClickTextCommand,
@@ -64,7 +67,7 @@ class PlanResponseModel(BaseModel):
             "The action kind. Must be one of: CLICK, DOUBLE_CLICK, "
             "RIGHT_CLICK, MOVE_TO, PRESS, TYPE, SCROLL, DRAG, WAIT, "
             "CLICK_TEXT, PAUSE, DOWNLOAD, ATTACH_FILE, CAPTURE_FOR_AI, "
-            "REMEMBER, RECALL."
+            "REMEMBER, RECALL, BROWSER_GO, BROWSER_CLICK, BROWSER_FILL."
         )
     )
     x: int | None = Field(default=None, description="Normalized X in [0,1000].")
@@ -116,6 +119,20 @@ class PlanResponseModel(BaseModel):
         description=(
             "For REMEMBER: true means extract the value from the current "
             "screenshot via the VLM. False/null means use `literal_value`."
+        ),
+    )
+    selector: str | None = Field(
+        default=None,
+        description=(
+            "CSS selector for BROWSER_CLICK / BROWSER_FILL. Picks the "
+            "first matching DOM element in the active Chrome tab."
+        ),
+    )
+    value: str | None = Field(
+        default=None,
+        description=(
+            "For BROWSER_FILL, the literal value to write into the "
+            "matched input. Privacy-redacted in logs the same way TYPE is."
         ),
     )
 
@@ -290,6 +307,19 @@ def plan_response_to_command(resp: PlanResponseModel) -> Command | None:
             )
         if kind == "RECALL" and resp.name:
             return RecallCommand(name=resp.name.strip())
+        if kind == "BROWSER_GO" and resp.url:
+            return BrowserGoCommand(url=resp.url.strip())
+        if kind == "BROWSER_CLICK" and resp.selector:
+            return BrowserClickCommand(selector=resp.selector.strip())
+        if kind == "BROWSER_FILL" and resp.selector is not None and resp.value is not None:
+            # Selector is stripped (whitespace-only selectors are
+            # never valid). Value is preserved verbatim — the planner
+            # may legitimately want to type a leading/trailing space
+            # (uncommon, but possible).
+            return BrowserFillCommand(
+                selector=resp.selector.strip(),
+                value=resp.value,
+            )
     except (TypeError, ValueError) as exc:
         log.warning("plan_response_to_command: bad payload: %s", exc)
         return None

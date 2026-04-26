@@ -35,6 +35,7 @@ from agent.parser import (
     parse_command,
 )
 from agent.tasks_loader import TaskStep
+from agent.vlm import PlanResponseModel, plan_response_to_command
 
 # ---------------------------------------------------------------------- parser
 
@@ -68,6 +69,15 @@ def test_parse_browser_fill_splits_on_first_comma_space() -> None:
     assert isinstance(cmd, BrowserFillCommand)
     assert cmd.selector == "input[type=search]"
     assert cmd.value == "baby"
+
+
+def test_parse_browser_fill_strips_trailing_whitespace_in_value() -> None:
+    """The greedy value-capture eats trailing whitespace before ``]`` —
+    we must strip it before sending to the browser, otherwise form
+    validation can fire on the trailing space (Devin Review #21)."""
+    cmd = parse_command("BROWSER_FILL [input#q, hello   ]")
+    assert isinstance(cmd, BrowserFillCommand)
+    assert cmd.value == "hello"
 
 
 def test_parse_browser_fill_value_with_internal_commas() -> None:
@@ -369,6 +379,68 @@ def test_extract_eval_value_handles_exception_replies() -> None:
 def test_extract_eval_value_returns_inner_value() -> None:
     reply = {"result": {"type": "string", "value": "OK"}}
     assert _extract_eval_value(reply) == "OK"
+
+
+def test_plan_response_browser_go_round_trip() -> None:
+    """JSON-output mode is the DEFAULT (ENABLE_JSON_OUTPUT=true) — the
+    converter MUST handle BROWSER_GO or the entire fast-path is dead on
+    arrival under default config (Devin Review #21)."""
+    cmd = plan_response_to_command(
+        PlanResponseModel(command="BROWSER_GO", url="https://youtube.com")
+    )
+    assert isinstance(cmd, BrowserGoCommand)
+    assert cmd.url == "https://youtube.com"
+
+
+def test_plan_response_browser_click_round_trip() -> None:
+    cmd = plan_response_to_command(
+        PlanResponseModel(command="BROWSER_CLICK", selector="button#go")
+    )
+    assert isinstance(cmd, BrowserClickCommand)
+    assert cmd.selector == "button#go"
+
+
+def test_plan_response_browser_fill_round_trip() -> None:
+    cmd = plan_response_to_command(
+        PlanResponseModel(
+            command="BROWSER_FILL",
+            selector="input[name=q]",
+            value="hello",
+        )
+    )
+    assert isinstance(cmd, BrowserFillCommand)
+    assert cmd.selector == "input[name=q]"
+    assert cmd.value == "hello"
+
+
+def test_plan_response_browser_fill_accepts_empty_value() -> None:
+    """Clearing a field with BROWSER_FILL [..., ""] is legitimate."""
+    cmd = plan_response_to_command(
+        PlanResponseModel(command="BROWSER_FILL", selector="input#q", value="")
+    )
+    assert isinstance(cmd, BrowserFillCommand)
+    assert cmd.value == ""
+
+
+def test_plan_response_browser_commands_reject_missing_required_fields() -> None:
+    """Defensive: dropping the required field must yield None, not crash."""
+    assert plan_response_to_command(PlanResponseModel(command="BROWSER_GO")) is None
+    assert (
+        plan_response_to_command(PlanResponseModel(command="BROWSER_CLICK")) is None
+    )
+    # FILL without selector OR without value must fail (both required).
+    assert (
+        plan_response_to_command(
+            PlanResponseModel(command="BROWSER_FILL", value="hi")
+        )
+        is None
+    )
+    assert (
+        plan_response_to_command(
+            PlanResponseModel(command="BROWSER_FILL", selector="#x")
+        )
+        is None
+    )
 
 
 def test_cdp_target_is_real_page_filters_devtools() -> None:

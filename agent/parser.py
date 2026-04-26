@@ -495,7 +495,12 @@ def parse_command(response: str) -> Command | None:
         m = _BROWSER_FILL_RE.search(response)
         if m:
             selector = m.group(1).strip()
-            value = m.group(2)
+            # Strip the value too — the greedy ``(.*)`` capture happily
+            # consumes trailing whitespace before the closing ``]``,
+            # which would otherwise be sent verbatim to the input field
+            # and trip form validation. Mirrors DOWNLOAD / REMEMBER which
+            # also strip both args.
+            value = (m.group(2) or "").strip()
             if selector:
                 return BrowserFillCommand(selector=selector, value=value)
 

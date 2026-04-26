@@ -30,9 +30,21 @@ if [[ -z "${CHROME:-}" ]]; then
     exit 1
 fi
 
-echo "[launch-chrome] profile=${PROFILE_DIR} url=${START_URL}"
+CDP_PORT="${CDP_PORT:-29229}"
+
+echo "[launch-chrome] profile=${PROFILE_DIR} url=${START_URL} cdp-port=${CDP_PORT}"
+# --remote-debugging-port exposes Chrome DevTools Protocol on localhost so
+# the agent's BROWSER_GO / BROWSER_CLICK / BROWSER_FILL fast-path can drive
+# the active tab without going through the VLM. Harmless when the agent
+# isn't using the fast path; only listens on localhost so it isn't a
+# remote-attack surface. Set CDP_PORT=0 to disable explicitly.
+DEBUG_FLAG=""
+if [[ "${CDP_PORT}" != "0" ]]; then
+    DEBUG_FLAG="--remote-debugging-port=${CDP_PORT}"
+fi
 exec "${CHROME}" \
     --user-data-dir="${PROFILE_DIR}" \
     --no-first-run \
     --no-default-browser-check \
+    ${DEBUG_FLAG} \
     "${START_URL}"

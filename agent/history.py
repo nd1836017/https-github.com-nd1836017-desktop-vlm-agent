@@ -11,6 +11,9 @@ from dataclasses import dataclass
 
 from .parser import (
     AttachFileCommand,
+    BrowserClickCommand,
+    BrowserFillCommand,
+    BrowserGoCommand,
     CaptureForAiCommand,
     ClickCommand,
     ClickTextCommand,
@@ -94,6 +97,21 @@ def render_command(cmd: Command, *, redact_type: bool = False) -> str:
         return f"REMEMBER [{cmd.name}]"
     if isinstance(cmd, RecallCommand):
         return f"RECALL [{cmd.name}]"
+    if isinstance(cmd, BrowserGoCommand):
+        return f"BROWSER_GO [{cmd.url}]"
+    if isinstance(cmd, BrowserClickCommand):
+        return f"BROWSER_CLICK [{cmd.selector}]"
+    if isinstance(cmd, BrowserFillCommand):
+        # BROWSER_FILL value is privacy-redacted on the same policy as
+        # TYPE — the value frequently carries usernames, passwords, or
+        # PII. Length is preserved so postmortems still distinguish
+        # "filled 6 chars" from "filled 200 chars".
+        if redact_type:
+            return (
+                f"BROWSER_FILL [{cmd.selector}, "
+                f"<REDACTED, {len(cmd.value)} chars>]"
+            )
+        return f"BROWSER_FILL [{cmd.selector}, {cmd.value}]"
     return str(cmd)
 
 

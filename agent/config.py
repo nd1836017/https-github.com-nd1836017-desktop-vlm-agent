@@ -51,6 +51,15 @@ class Config:
     vlm_image_max_dim: int
     vlm_image_quality: int
     vlm_skip_identical_frames: bool
+    # Browser fast-path: when true and Chrome is reachable on the CDP
+    # debug port, the planner is told it can emit BROWSER_GO /
+    # BROWSER_CLICK / BROWSER_FILL primitives that bypass vision-tokens.
+    # Default OFF until the user has tested with their actual Chrome
+    # setup; flip to true after launching Chrome with
+    # ``--remote-debugging-port=29229``.
+    browser_fast_path: bool
+    browser_cdp_host: str
+    browser_cdp_port: int
 
     @classmethod
     def load(cls) -> Config:
@@ -111,6 +120,9 @@ class Config:
             vlm_skip_identical_frames=_env_bool(
                 "VLM_SKIP_IDENTICAL_FRAMES", default=False
             ),
+            browser_fast_path=_env_bool("BROWSER_FAST_PATH", default=False),
+            browser_cdp_host=os.getenv("BROWSER_CDP_HOST", "localhost").strip(),
+            browser_cdp_port=int(os.getenv("BROWSER_CDP_PORT", "29229")),
         )
         if cfg.rpd_warn_threshold >= cfg.rpd_halt_threshold:
             raise ValueError(

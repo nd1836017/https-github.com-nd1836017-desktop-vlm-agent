@@ -23,6 +23,9 @@ from pydantic import BaseModel, Field, ValidationError
 from .cost import RpdGuard
 from .parser import (
     AttachFileCommand,
+    BrowserClickCommand,
+    BrowserFillCommand,
+    BrowserGoCommand,
     CaptureForAiCommand,
     ClickCommand,
     ClickTextCommand,
@@ -64,7 +67,7 @@ class PlanResponseModel(BaseModel):
             "The action kind. Must be one of: CLICK, DOUBLE_CLICK, "
             "RIGHT_CLICK, MOVE_TO, PRESS, TYPE, SCROLL, DRAG, WAIT, "
             "CLICK_TEXT, PAUSE, DOWNLOAD, ATTACH_FILE, CAPTURE_FOR_AI, "
-            "REMEMBER, RECALL."
+            "REMEMBER, RECALL, BROWSER_GO, BROWSER_CLICK, BROWSER_FILL."
         )
     )
     x: int | None = Field(default=None, description="Normalized X in [0,1000].")
@@ -116,6 +119,20 @@ class PlanResponseModel(BaseModel):
         description=(
             "For REMEMBER: true means extract the value from the current "
             "screenshot via the VLM. False/null means use `literal_value`."
+        ),
+    )
+    selector: str | None = Field(
+        default=None,
+        description=(
+            "CSS selector for BROWSER_CLICK / BROWSER_FILL. Picks the "
+            "first matching DOM element in the active Chrome tab."
+        ),
+    )
+    value: str | None = Field(
+        default=None,
+        description=(
+            "For BROWSER_FILL, the literal value to write into the "
+            "matched input. Privacy-redacted in logs the same way TYPE is."
         ),
     )
 
@@ -290,6 +307,19 @@ def plan_response_to_command(resp: PlanResponseModel) -> Command | None:
             )
         if kind == "RECALL" and resp.name:
             return RecallCommand(name=resp.name.strip())
+        if kind == "BROWSER_GO" and resp.url:
+            return BrowserGoCommand(url=resp.url.strip())
+        if kind == "BROWSER_CLICK" and resp.selector:
+            return BrowserClickCommand(selector=resp.selector.strip())
+        if kind == "BROWSER_FILL" and resp.selector is not None and resp.value is not None:
+            # Selector is stripped (whitespace-only selectors are
+            # never valid). Value is preserved verbatim — the planner
+            # may legitimately want to type a leading/trailing space
+            # (uncommon, but possible).
+            return BrowserFillCommand(
+                selector=resp.selector.strip(),
+                value=resp.value,
+            )
     except (TypeError, ValueError) as exc:
         log.warning("plan_response_to_command: bad payload: %s", exc)
         return None
@@ -437,6 +467,34 @@ FOCUS-BEFORE-TYPE — never blind-type:
 """
 
 
+# Browser-fast-path command appendix. Spliced into the ACTION prompt
+# ONLY when the executor has actually connected to Chrome's CDP debug
+# port (BROWSER_FAST_PATH=true + Chrome reachable). When the bridge is
+# disabled, advertising these commands is actively harmful: the planner
+# would emit BROWSER_GO on navigation steps, every attempt fails, and
+# we burn replan budget on dead-on-arrival commands.
+_ACTION_BROWSER_FAST_PATH_COMMANDS = """
+ALSO AVAILABLE — Chrome browser fast-path (the user has launched Chrome with --remote-debugging-port; these primitives drive the page DOM directly via CDP, costing zero vision tokens):
+
+    BROWSER_GO [URL]         — navigate the active Chrome tab to URL via the DevTools Protocol. URL must start with http:// or https://. STRONGLY PREFERRED over CLICKing the address bar + TYPING + PRESS [enter] (3 expensive steps) when the URL is known. If the bridge fails (e.g. selector miss elsewhere caused a disconnect), the command will return a clear failure and you should fall back to the visual address-bar flow on the next attempt. Example: BROWSER_GO [https://youtube.com].
+    BROWSER_CLICK [SELECTOR] — click the first DOM element matching the CSS selector inside the active Chrome tab. Costs zero vision tokens. Use when you know a stable selector (e.g. button[aria-label='Search'], #submit-btn). For most icon-only or canvas-rendered controls, fall back to CLICK or CLICK_TEXT. Example: BROWSER_CLICK [button[aria-label='Search']].
+    BROWSER_FILL [SELECTOR, VALUE] — set the value of an input/textarea matching SELECTOR (dispatches input + change events so React/Vue forms see the change). Replaces CLICK + TYPE for known form fields. Like BROWSER_CLICK, only valid for Chrome tabs and only when you know a stable selector. Example: BROWSER_FILL [input[type=search], baby].
+"""
+
+
+def _build_action_prompt(*, enable_browser_fast_path: bool) -> str:
+    """Return the planner system prompt, with or without browser commands.
+
+    Browser primitives are appended ONLY when the bridge is actually
+    available — otherwise the planner would emit BROWSER_GO on every
+    navigation step, each attempt would fail, and we'd burn replan
+    budget on commands that can't possibly succeed in this run.
+    """
+    if not enable_browser_fast_path:
+        return ACTION_SYSTEM_PROMPT
+    return ACTION_SYSTEM_PROMPT + _ACTION_BROWSER_FAST_PATH_COMMANDS
+
+
 VERIFY_SYSTEM_PROMPT = """You are a verification assistant for a desktop automation agent.
 
 You are given:
@@ -551,6 +609,12 @@ class GeminiClient:
         image_max_dim: int = 1280,
         image_quality: int = 80,
         skip_identical_frames: bool = False,
+        # When True, the planner's system prompt includes the
+        # BROWSER_GO / BROWSER_CLICK / BROWSER_FILL commands. Default
+        # OFF so the planner doesn't emit doomed CDP commands when the
+        # bridge isn't actually connected. Set this only when the agent
+        # has confirmed BrowserBridge.connect() succeeded.
+        enable_browser_fast_path: bool = False,
     ) -> None:
         self._client = genai.Client(api_key=api_key)
         self._model_name = model_name
@@ -568,11 +632,14 @@ class GeminiClient:
         # we replace the image with a text marker — saves an entire
         # vision tokenization pass.
         self._last_planner_signature: str | None = None
+        action_prompt = _build_action_prompt(
+            enable_browser_fast_path=enable_browser_fast_path
+        )
         self._action_config = types.GenerateContentConfig(
-            system_instruction=ACTION_SYSTEM_PROMPT,
+            system_instruction=action_prompt,
         )
         self._action_config_json = types.GenerateContentConfig(
-            system_instruction=ACTION_SYSTEM_PROMPT,
+            system_instruction=action_prompt,
             response_mime_type="application/json",
             response_schema=PlanResponseModel,
         )

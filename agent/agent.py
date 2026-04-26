@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .artifacts import ArtifactWriter
+from .browser_bridge import BrowserBridge
 from .config import Config
 from .cost import RpdGuard
 from .executor import execute, execute_click_pixels
@@ -35,6 +36,9 @@ from .history import History, render_command
 from .ocr import find_text_center
 from .parser import (
     AttachFileCommand,
+    BrowserClickCommand,
+    BrowserFillCommand,
+    BrowserGoCommand,
     CaptureForAiCommand,
     ClickCommand,
     ClickTextCommand,
@@ -360,6 +364,7 @@ def _attempt_step(
     step_idx: int = 0,
     extra_images: list[bytes] | None = None,
     variables: VariableStore | None = None,
+    browser_bridge: BrowserBridge | None = None,
 ) -> tuple[VerificationResult | PauseRequested, str]:
     """Run one plan/execute/verify attempt and return (verdict, action_text).
 
@@ -517,6 +522,62 @@ def _attempt_step(
                 action_text,
             )
 
+        # Browser fast-path primitives: drive Chrome via CDP. Like file /
+        # memory commands these synthesize PASS/FAIL based on the bridge's
+        # success rather than calling the visual verifier — BROWSER_GO and
+        # BROWSER_FILL definitively change the page when they succeed
+        # (Page.navigate fires; setting an input's value + dispatching
+        # input/change events is observable to React/Vue), and the next
+        # natural-language step's verifier pass will catch any mismatch
+        # against the user's intent.
+        if isinstance(
+            cmd, (BrowserGoCommand, BrowserClickCommand, BrowserFillCommand)
+        ):
+            if browser_bridge is None or not browser_bridge.is_connected():
+                # Two failure modes are both real:
+                #   - BROWSER_FAST_PATH=false (bridge wasn't created)
+                #   - bridge created but couldn't connect to CDP at run start
+                # In both cases we fail this attempt with a clear reason; the
+                # planner sees previous_failure and will replan to the visual
+                # equivalent (CLICK / TYPE / etc.) on the next attempt.
+                return (
+                    VerificationResult(
+                        passed=False,
+                        reason=(
+                            "Browser fast-path command emitted but Chrome "
+                            "CDP bridge is not available. Use the visual "
+                            "primitives (CLICK / TYPE / PRESS) instead, or "
+                            "launch Chrome with --remote-debugging-port=29229 "
+                            "and set BROWSER_FAST_PATH=true."
+                        ),
+                    ),
+                    f"<{cmd.kind} blocked — bridge unavailable>",
+                )
+            if isinstance(cmd, BrowserGoCommand):
+                ok, action_text = browser_bridge.navigate(cmd.url)
+            elif isinstance(cmd, BrowserClickCommand):
+                ok, action_text = browser_bridge.click(cmd.selector)
+            else:
+                ok, action_text = browser_bridge.fill(cmd.selector, cmd.value)
+            log.info("Action: %s", action_text)
+            if artifact_writer is not None:
+                try:
+                    post_screenshot = capture_screenshot()
+                    artifact_writer.save_after(step_idx, post_screenshot)
+                except Exception as exc:  # pragma: no cover - defensive
+                    log.warning(
+                        "Failed to capture post-action screenshot for "
+                        "browser command on step %d: %s",
+                        step_idx,
+                        exc,
+                    )
+                artifact_writer.save_plan(step_idx, raw, action_text)
+                artifact_writer.save_verdict(step_idx, ok, action_text)
+            return (
+                VerificationResult(passed=ok, reason=action_text),
+                action_text,
+            )
+
         if isinstance(cmd, ClickTextCommand):
             ok, action_text = _execute_click_text(
                 cmd=cmd,
@@ -625,6 +686,7 @@ def run_step(
     variables: VariableStore | None = None,
     step_timeout_seconds: float = 0.0,
     stuck_step_threshold: int = 0,
+    browser_bridge: BrowserBridge | None = None,
 ) -> VerificationResult:
     """Run one step with up to `max_replans` replans on verify FAIL.
 
@@ -760,6 +822,7 @@ def run_step(
             step_idx=step_idx,
             extra_images=extra_images,
             variables=variables,
+            browser_bridge=browser_bridge,
         )
 
         # PAUSE: ask the human, then loop back without consuming the
@@ -935,6 +998,43 @@ def run(
             features.var_placeholder_count,
         )
 
+    # Browser fast-path bridge: connect to Chrome's CDP debug port so
+    # BROWSER_GO / BROWSER_CLICK / BROWSER_FILL primitives can drive the
+    # active tab directly. Gated on BOTH ``BROWSER_FAST_PATH=true`` (env
+    # opt-in) AND a feature hint in the tasks file — connecting to CDP
+    # for a tasks file that never asks for it would just add startup
+    # latency. Failure to connect is non-fatal: every browser command
+    # then synthesizes a clear FAIL with a message telling the planner
+    # to use the visual primitives instead.
+    browser_bridge: BrowserBridge | None = None
+    if config.browser_fast_path and features.uses_browser_fast_path:
+        browser_bridge = BrowserBridge(
+            host=config.browser_cdp_host,
+            port=config.browser_cdp_port,
+        )
+        if browser_bridge.connect():
+            log.info(
+                "Browser fast-path enabled "
+                "(BROWSER_GO=%d, BROWSER_CLICK=%d, BROWSER_FILL=%d)",
+                features.browser_go_count,
+                features.browser_click_count,
+                features.browser_fill_count,
+            )
+        else:
+            log.warning(
+                "BROWSER_FAST_PATH=true but Chrome CDP at %s:%d is not "
+                "reachable. Browser commands will fail; use the visual "
+                "primitives instead, or relaunch Chrome with "
+                "--remote-debugging-port=%d.",
+                config.browser_cdp_host,
+                config.browser_cdp_port,
+                config.browser_cdp_port,
+            )
+            # Keep the (unconnected) bridge around so the executor's
+            # is_connected() check fails fast with a clear message
+            # rather than crashing on a None reference. close() is a
+            # no-op when never connected.
+
     # Checkpoint handling.
     existing_state = load_state(config.state_file) if resume else None
     start_idx = 1
@@ -989,6 +1089,13 @@ def run(
         image_max_dim=config.vlm_image_max_dim,
         image_quality=config.vlm_image_quality,
         skip_identical_frames=config.vlm_skip_identical_frames,
+        # Only advertise BROWSER_* commands to the planner when the
+        # bridge is actually connected. Otherwise the planner would
+        # emit BROWSER_GO on every navigation step, every attempt
+        # would FAIL, and replan budget would burn on doomed commands.
+        enable_browser_fast_path=(
+            browser_bridge is not None and browser_bridge.is_connected()
+        ),
     )
     history = History(window=config.history_window)
     replan_counter = ReplanCounter(total_max=config.max_total_replans)
@@ -1071,6 +1178,7 @@ def run(
                 variables=variables,
                 step_timeout_seconds=config.step_timeout_seconds,
                 stuck_step_threshold=config.stuck_step_threshold,
+                browser_bridge=browser_bridge,
             )
 
             # action_text is resolved inside the writer from the most recent
@@ -1125,3 +1233,7 @@ def run(
         # tasks file didn't use any file primitives.
         if workspace is not None:
             workspace.finalize(success=success)
+        # Drop the CDP websocket. ``close()`` is a no-op if we never
+        # connected, so this is safe whether or not the bridge was used.
+        if browser_bridge is not None:
+            browser_bridge.close()

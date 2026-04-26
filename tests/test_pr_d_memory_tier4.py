@@ -145,6 +145,9 @@ def _cfg(tmp_path, tasks_text: str, **overrides) -> Config:
         vlm_image_max_dim=1280,
         vlm_image_quality=80,
         vlm_skip_identical_frames=False,
+        browser_fast_path=False,
+        browser_cdp_host="localhost",
+        browser_cdp_port=29229,
     )
     defaults.update(overrides)
     return Config(**defaults)

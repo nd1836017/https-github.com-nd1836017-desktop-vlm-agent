@@ -42,6 +42,20 @@ Supported commands:
                                   currently focused field. Convenience
                                   primitive when you don't want to write
                                   the placeholder out.
+    BROWSER_GO [url]            — navigate the active Chrome tab to URL
+                                  via the DevTools Protocol. Bypasses
+                                  CLICK address bar / TYPE / PRESS Enter
+                                  for ~3 expensive steps of savings.
+                                  Requires Chrome launched with
+                                  ``--remote-debugging-port=29229``.
+    BROWSER_CLICK [selector]    — click the first element matching the
+                                  CSS selector via CDP. ~0 vision tokens.
+                                  Falls back to FAIL when the selector
+                                  doesn't match anything.
+    BROWSER_FILL [sel, value]   — set the value of an input/textarea
+                                  matched by selector + dispatch input
+                                  events. Replaces CLICK + TYPE for
+                                  most form fields.
 
 The parser is defensive: it tolerates surrounding conversational text,
 case variations, and a few common bracket omissions. It never raises on
@@ -74,6 +88,9 @@ CommandType = Literal[
     "CAPTURE_FOR_AI",
     "REMEMBER",
     "RECALL",
+    "BROWSER_GO",
+    "BROWSER_CLICK",
+    "BROWSER_FILL",
 ]
 
 
@@ -222,6 +239,47 @@ class RecallCommand:
     name: str = ""
 
 
+@dataclass(frozen=True)
+class BrowserGoCommand:
+    """Navigate the active Chrome tab to ``url`` via CDP Page.navigate.
+
+    URL must start with ``http://`` or ``https://`` — the agent does
+    not guess schemes.
+    """
+
+    kind: CommandType = "BROWSER_GO"
+    url: str = ""
+
+
+@dataclass(frozen=True)
+class BrowserClickCommand:
+    """Click the first DOM element matching ``selector``.
+
+    ``selector`` is any valid CSS selector. The bridge uses
+    ``element.click()`` which dispatches a synthetic click event suitable
+    for buttons, links, and most form controls. Custom drag handles or
+    canvas-rendered controls won't respond to a synthetic event — fall
+    back to the visual ``CLICK`` for those.
+    """
+
+    kind: CommandType = "BROWSER_CLICK"
+    selector: str = ""
+
+
+@dataclass(frozen=True)
+class BrowserFillCommand:
+    """Set ``value`` on the first input/textarea matching ``selector``.
+
+    Dispatches ``input`` and ``change`` events so React/Vue/Svelte
+    controlled components see the change. ``value`` is privacy-redacted
+    in any history / log rendering — the same policy as TYPE.
+    """
+
+    kind: CommandType = "BROWSER_FILL"
+    selector: str = ""
+    value: str = ""
+
+
 Command = (
     ClickCommand
     | DoubleClickCommand
@@ -239,6 +297,9 @@ Command = (
     | CaptureForAiCommand
     | RememberCommand
     | RecallCommand
+    | BrowserGoCommand
+    | BrowserClickCommand
+    | BrowserFillCommand
 )
 
 
@@ -317,6 +378,33 @@ _RECALL_RE = re.compile(
     r"RECALL\s*\[\s*([A-Za-z_][\w]*)\s*\]",
     re.IGNORECASE,
 )
+# Browser-fast-path primitives. URL must be absolute http(s); selector
+# is any CSS selector (no commas inside, since commas separate the two
+# args of BROWSER_FILL — selectors with commas should use :is() / :where()
+# or split into separate calls).
+_BROWSER_GO_RE = re.compile(
+    r"BROWSER[_\s]?GO\s*\[\s*(https?://\S+?)\s*\]",
+    re.IGNORECASE,
+)
+# Greedy match anchored to end-of-line so CSS attribute selectors
+# (``button[aria-label='Search']``) keep their inner ``]`` instead of
+# the regex stopping at the first close bracket and truncating the
+# selector. The planner emits one command per line wrapped in brackets.
+_BROWSER_CLICK_RE = re.compile(
+    r"BROWSER[_\s]?CLICK\s*\[\s*(.+)\s*\]\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+# BROWSER_FILL splits on the FIRST comma+whitespace (same convention as
+# DOWNLOAD) so values containing bare commas survive intact. Selectors
+# with commas must use :is(...) instead.
+# Selector is non-greedy up to the FIRST ``, `` (matching DOWNLOAD's
+# convention so values can carry bare commas). Value is greedy to the
+# last ``]`` on the line, again to survive selectors/values containing
+# brackets.
+_BROWSER_FILL_RE = re.compile(
+    r"BROWSER[_\s]?FILL\s*\[\s*(.+?),\s+(.*)\s*\]\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 # --- Lenient fallbacks (missing brackets, common prose forms). ----------------
@@ -391,6 +479,36 @@ def parse_command(response: str) -> Command | None:
             name = m.group(1).strip()
             if name:
                 return RecallCommand(name=name)
+
+        # Browser-fast-path primitives. Must be tried before CLICK so the
+        # generic CLICK pattern doesn't mistakenly match the inside of
+        # ``BROWSER_CLICK [button.search]``. BROWSER_FILL is tried before
+        # BROWSER_CLICK because BROWSER_FILL is a strict superset of the
+        # CLICK shape (CLICK has 1 arg, FILL has 2) — _BROWSER_CLICK_RE
+        # would happily match the first arg of a FILL otherwise.
+        m = _BROWSER_GO_RE.search(response)
+        if m:
+            url = m.group(1).strip()
+            if url:
+                return BrowserGoCommand(url=url)
+
+        m = _BROWSER_FILL_RE.search(response)
+        if m:
+            selector = m.group(1).strip()
+            # Strip the value too — the greedy ``(.*)`` capture happily
+            # consumes trailing whitespace before the closing ``]``,
+            # which would otherwise be sent verbatim to the input field
+            # and trip form validation. Mirrors DOWNLOAD / REMEMBER which
+            # also strip both args.
+            value = (m.group(2) or "").strip()
+            if selector:
+                return BrowserFillCommand(selector=selector, value=value)
+
+        m = _BROWSER_CLICK_RE.search(response)
+        if m:
+            selector = m.group(1).strip()
+            if selector:
+                return BrowserClickCommand(selector=selector)
 
         # CLICK_TEXT must be tried before CLICK so the CLICK regex doesn't
         # mistakenly match prose inside a CLICK_TEXT label.

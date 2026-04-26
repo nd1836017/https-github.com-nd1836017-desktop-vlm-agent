@@ -1089,6 +1089,13 @@ def run(
         image_max_dim=config.vlm_image_max_dim,
         image_quality=config.vlm_image_quality,
         skip_identical_frames=config.vlm_skip_identical_frames,
+        # Only advertise BROWSER_* commands to the planner when the
+        # bridge is actually connected. Otherwise the planner would
+        # emit BROWSER_GO on every navigation step, every attempt
+        # would FAIL, and replan budget would burn on doomed commands.
+        enable_browser_fast_path=(
+            browser_bridge is not None and browser_bridge.is_connected()
+        ),
     )
     history = History(window=config.history_window)
     replan_counter = ReplanCounter(total_max=config.max_total_replans)

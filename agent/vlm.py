@@ -442,9 +442,6 @@ RESPOND WITH EXACTLY ONE COMMAND on its own line, chosen from:
     REMEMBER [NAME]          — extract the value labeled NAME off the current screen and store it as a run variable. NAME is a plain identifier (alphanumeric and underscores). The agent will read the screenshot and decide what value belongs to NAME — pick this command when the next steps need a value (order id, confirmation number, account name, etc.) that is currently visible on screen. Example: REMEMBER [order_id].
     REMEMBER [NAME = LITERAL] — store LITERAL as the value of NAME with no extraction. Useful when you already know the value (e.g. derived from a previous CAPTURE_FOR_AI). Example: REMEMBER [order_id = ND12345].
     RECALL [NAME]            — type the stored value of variable NAME into the focused field. Equivalent to TYPE [{{var.NAME}}]. Use after a REMEMBER. Example: RECALL [order_id].
-    BROWSER_GO [URL]         — navigate the active Chrome tab to URL via the DevTools Protocol. URL must start with http:// or https://. STRONGLY PREFERRED over CLICKing the address bar + TYPING + PRESS [enter] (3 expensive steps) when the URL is known. Only available when the user has launched Chrome with --remote-debugging-port; if the bridge is unavailable this command will fail with a clear message and you should fall back to the visual address-bar flow on the next attempt. Example: BROWSER_GO [https://youtube.com].
-    BROWSER_CLICK [SELECTOR] — click the first DOM element matching the CSS selector inside the active Chrome tab. Costs zero vision tokens. Use when you know a stable selector (e.g. button[aria-label='Search'], #submit-btn). For most icon-only or canvas-rendered controls, fall back to CLICK or CLICK_TEXT. Example: BROWSER_CLICK [button[aria-label='Search']].
-    BROWSER_FILL [SELECTOR, VALUE] — set the value of an input/textarea matching SELECTOR (dispatches input + change events so React/Vue forms see the change). Replaces CLICK + TYPE for known form fields. Like BROWSER_CLICK, only valid for Chrome tabs and only when you know a stable selector. Example: BROWSER_FILL [input[type=search], baby].
 
 Rules:
 - Output ONLY the command, wrapped in square brackets. No prose, no markdown, no explanation.
@@ -468,6 +465,34 @@ FOCUS-BEFORE-TYPE — never blind-type:
 - If the previous-attempt failure says "field is still empty", "search bar empty", "nothing typed", "input not received", or anything similar, your VERY NEXT action MUST be a CLICK or CLICK_TEXT on the target field — NOT another TYPE. Re-typing without focusing reproduces the same failure and will get the step killed by stuck-step detection.
 - Same rule applies to PRESS [enter] / PRESS [tab] when those are meant to submit a form: if the form field looks empty in the screenshot, you don't have focus yet — CLICK first.
 """
+
+
+# Browser-fast-path command appendix. Spliced into the ACTION prompt
+# ONLY when the executor has actually connected to Chrome's CDP debug
+# port (BROWSER_FAST_PATH=true + Chrome reachable). When the bridge is
+# disabled, advertising these commands is actively harmful: the planner
+# would emit BROWSER_GO on navigation steps, every attempt fails, and
+# we burn replan budget on dead-on-arrival commands.
+_ACTION_BROWSER_FAST_PATH_COMMANDS = """
+ALSO AVAILABLE — Chrome browser fast-path (the user has launched Chrome with --remote-debugging-port; these primitives drive the page DOM directly via CDP, costing zero vision tokens):
+
+    BROWSER_GO [URL]         — navigate the active Chrome tab to URL via the DevTools Protocol. URL must start with http:// or https://. STRONGLY PREFERRED over CLICKing the address bar + TYPING + PRESS [enter] (3 expensive steps) when the URL is known. If the bridge fails (e.g. selector miss elsewhere caused a disconnect), the command will return a clear failure and you should fall back to the visual address-bar flow on the next attempt. Example: BROWSER_GO [https://youtube.com].
+    BROWSER_CLICK [SELECTOR] — click the first DOM element matching the CSS selector inside the active Chrome tab. Costs zero vision tokens. Use when you know a stable selector (e.g. button[aria-label='Search'], #submit-btn). For most icon-only or canvas-rendered controls, fall back to CLICK or CLICK_TEXT. Example: BROWSER_CLICK [button[aria-label='Search']].
+    BROWSER_FILL [SELECTOR, VALUE] — set the value of an input/textarea matching SELECTOR (dispatches input + change events so React/Vue forms see the change). Replaces CLICK + TYPE for known form fields. Like BROWSER_CLICK, only valid for Chrome tabs and only when you know a stable selector. Example: BROWSER_FILL [input[type=search], baby].
+"""
+
+
+def _build_action_prompt(*, enable_browser_fast_path: bool) -> str:
+    """Return the planner system prompt, with or without browser commands.
+
+    Browser primitives are appended ONLY when the bridge is actually
+    available — otherwise the planner would emit BROWSER_GO on every
+    navigation step, each attempt would fail, and we'd burn replan
+    budget on commands that can't possibly succeed in this run.
+    """
+    if not enable_browser_fast_path:
+        return ACTION_SYSTEM_PROMPT
+    return ACTION_SYSTEM_PROMPT + _ACTION_BROWSER_FAST_PATH_COMMANDS
 
 
 VERIFY_SYSTEM_PROMPT = """You are a verification assistant for a desktop automation agent.
@@ -584,6 +609,12 @@ class GeminiClient:
         image_max_dim: int = 1280,
         image_quality: int = 80,
         skip_identical_frames: bool = False,
+        # When True, the planner's system prompt includes the
+        # BROWSER_GO / BROWSER_CLICK / BROWSER_FILL commands. Default
+        # OFF so the planner doesn't emit doomed CDP commands when the
+        # bridge isn't actually connected. Set this only when the agent
+        # has confirmed BrowserBridge.connect() succeeded.
+        enable_browser_fast_path: bool = False,
     ) -> None:
         self._client = genai.Client(api_key=api_key)
         self._model_name = model_name
@@ -601,11 +632,14 @@ class GeminiClient:
         # we replace the image with a text marker — saves an entire
         # vision tokenization pass.
         self._last_planner_signature: str | None = None
+        action_prompt = _build_action_prompt(
+            enable_browser_fast_path=enable_browser_fast_path
+        )
         self._action_config = types.GenerateContentConfig(
-            system_instruction=ACTION_SYSTEM_PROMPT,
+            system_instruction=action_prompt,
         )
         self._action_config_json = types.GenerateContentConfig(
-            system_instruction=ACTION_SYSTEM_PROMPT,
+            system_instruction=action_prompt,
             response_mime_type="application/json",
             response_schema=PlanResponseModel,
         )

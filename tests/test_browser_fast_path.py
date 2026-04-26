@@ -404,6 +404,31 @@ def test_extract_eval_value_returns_inner_value() -> None:
     assert _extract_eval_value(reply) == "OK"
 
 
+def test_action_prompt_excludes_browser_commands_by_default() -> None:
+    """When the bridge is NOT connected, advertising BROWSER_* in the
+    system prompt would make the planner emit doomed CDP commands and
+    burn replan budget. The default-off behavior is the safety guarantee
+    (Devin Review #21 follow-up)."""
+    from agent.vlm import _build_action_prompt
+
+    prompt = _build_action_prompt(enable_browser_fast_path=False)
+    assert "BROWSER_GO" not in prompt
+    assert "BROWSER_CLICK" not in prompt
+    assert "BROWSER_FILL" not in prompt
+    # Sanity: the rest of the prompt is still there.
+    assert "CLICK [X,Y]" in prompt
+    assert "RECALL [NAME]" in prompt
+
+
+def test_action_prompt_includes_browser_commands_when_enabled() -> None:
+    from agent.vlm import _build_action_prompt
+
+    prompt = _build_action_prompt(enable_browser_fast_path=True)
+    assert "BROWSER_GO [URL]" in prompt
+    assert "BROWSER_CLICK [SELECTOR]" in prompt
+    assert "BROWSER_FILL [SELECTOR, VALUE]" in prompt
+
+
 def test_plan_response_browser_go_round_trip() -> None:
     """JSON-output mode is the DEFAULT (ENABLE_JSON_OUTPUT=true) — the
     converter MUST handle BROWSER_GO or the entire fast-path is dead on

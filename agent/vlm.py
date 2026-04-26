@@ -420,6 +420,20 @@ Rules:
 - If the step has already been completed, still emit a single no-op friendly command (e.g. WAIT [0.5]) — never output nothing.
 - You may be shown a summary of previous steps and a previous-attempt failure reason. Use them to avoid repeating mistakes and to pick a DIFFERENT action when replanning after a failure.
 - NEVER attempt to bypass a 2FA or CAPTCHA challenge yourself. ALWAYS emit PAUSE [reason] in that situation — a human will resolve it and resume the agent.
+
+ONE COMMAND AT A TIME — handling compound steps:
+- Each step may describe several actions ("type X and press enter", "click the menu then choose Save", "open the file and read the first line"). You can only emit ONE command per call. Pick the FIRST / MOST FOUNDATIONAL action — the one that has to happen before anything else can.
+- The verifier will FAIL the step until ALL parts are done; that's expected. On the next attempt you'll see the previous-attempt failure reason, and you should emit the NEXT action in the sequence — not retry the first one.
+- Example: step 'type "baby" in the search bar and press Enter':
+    1st attempt → emit CLICK_TEXT [Search] (focus the field). Verifier says FAIL ("field is empty / nothing typed yet"). Good — that's progress.
+    2nd attempt → see the failure, emit TYPE [baby] (now the field is focused).
+    3rd attempt → emit PRESS [enter] to submit.
+
+FOCUS-BEFORE-TYPE — never blind-type:
+- TYPE only sends keystrokes to whatever is currently focused. If the focused element is the URL bar, the desktop, or nothing, your text goes to the wrong place — the visible text field stays empty.
+- BEFORE every TYPE, the target field MUST be focused. If unsure, emit CLICK [X,Y] on the field's center, or CLICK_TEXT [Search box label] on its label/placeholder, FIRST.
+- If the previous-attempt failure says "field is still empty", "search bar empty", "nothing typed", "input not received", or anything similar, your VERY NEXT action MUST be a CLICK or CLICK_TEXT on the target field — NOT another TYPE. Re-typing without focusing reproduces the same failure and will get the step killed by stuck-step detection.
+- Same rule applies to PRESS [enter] / PRESS [tab] when those are meant to submit a form: if the form field looks empty in the screenshot, you don't have focus yet — CLICK first.
 """
 
 

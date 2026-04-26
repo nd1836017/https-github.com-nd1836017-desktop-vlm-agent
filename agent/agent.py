@@ -836,12 +836,21 @@ def run_step(
                     len(recent_signatures) >= stuck_step_threshold
                     and len(set(recent_signatures)) == 1
                 ):
+                    # Include the action the planner kept emitting so a
+                    # postmortem reader can see WHAT the agent tried,
+                    # not just "it failed". The two most common failure
+                    # modes are: (a) TYPE without a focused field —
+                    # action_text says TYPE [...], (b) CLICK on the
+                    # wrong coordinates — action_text says CLICK [x,y].
+                    # Either way, surfacing the command makes the
+                    # next-action diagnosis obvious.
                     stuck = VerificationResult(
                         passed=False,
                         reason=(
                             f"Step appears stuck — last "
                             f"{stuck_step_threshold} attempts produced "
                             f"identical screen state. "
+                            f"Last action attempted: {action_text}. "
                             f"Last failure: {verdict.reason}"
                         ),
                     )

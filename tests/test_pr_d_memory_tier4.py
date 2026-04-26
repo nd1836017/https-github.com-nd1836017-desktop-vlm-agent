@@ -545,6 +545,14 @@ def test_run_step_stuck_step_detection_bails_early(fake_geometry):
     assert "stuck" in result.reason.lower()
     # Bail at attempt 3, not 11.
     assert client.plan_calls == 3
+    # Stuck-step HALT reason must surface the action that kept failing
+    # so a postmortem reader can see WHAT the agent kept trying.
+    # (UX upgrade #1 — better stuck message.) TYPE payloads are
+    # privacy-redacted to avoid leaking user-typed text into error logs;
+    # the action *class* (TYPE) and length are still visible.
+    assert "Last action attempted" in result.reason
+    assert "TYPE [" in result.reason  # command class survives redaction
+    assert "nothing changed" in result.reason
 
 
 def test_run_step_no_stuck_when_screen_changes(fake_geometry):

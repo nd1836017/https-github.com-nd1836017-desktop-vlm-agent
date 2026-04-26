@@ -276,6 +276,29 @@ def test_browser_bridge_navigate_happy_path() -> None:
     ]
 
 
+def test_browser_bridge_navigate_reports_chrome_error_text() -> None:
+    """Chrome signals nav failures (DNS, connection refused, etc.) via
+    ``errorText`` on the result, not the protocol-level error key. The
+    bridge MUST treat that as ok=False, otherwise a typo'd URL would
+    checkpoint as PASS and the agent would run subsequent steps against
+    the wrong page (Devin Review #21 follow-up)."""
+    bridge, _ = _bridge_with_ws(
+        [
+            {
+                "id": 1,
+                "result": {
+                    "frameId": "F1",
+                    "errorText": "net::ERR_NAME_NOT_RESOLVED",
+                },
+            }
+        ]
+    )
+    ok, msg = bridge.navigate("https://no-such-domain.invalid")
+    assert ok is False
+    assert "navigation error" in msg
+    assert "ERR_NAME_NOT_RESOLVED" in msg
+
+
 def test_browser_bridge_navigate_rejects_relative_url() -> None:
     bridge, fake = _bridge_with_ws([])
     ok, msg = bridge.navigate("youtube.com")

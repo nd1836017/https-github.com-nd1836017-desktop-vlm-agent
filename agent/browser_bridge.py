@@ -163,9 +163,18 @@ class BrowserBridge:
         if not (url.startswith("http://") or url.startswith("https://")):
             return False, f"BROWSER_GO: URL must start with http:// or https:// (got {url!r})"
         try:
-            self._send("Page.navigate", {"url": url})
+            result = self._send("Page.navigate", {"url": url})
         except BrowserBridgeUnavailable as exc:
             return False, f"BROWSER_GO failed: {exc}"
+        # Chrome surfaces navigation failures (DNS, connection refused,
+        # ERR_NAME_NOT_RESOLVED, etc.) via an ``errorText`` field on the
+        # result dict — NOT through the protocol-level ``error`` key that
+        # ``_send`` already raises on. Without this check, a typo'd URL
+        # gets marked PASS, the checkpoint advances, and the next step
+        # runs against the wrong page (or no page at all).
+        error_text = result.get("errorText") if isinstance(result, dict) else None
+        if error_text:
+            return False, f"BROWSER_GO [{url}] — navigation error: {error_text}"
         return True, f"BROWSER_GO [{url}]"
 
     def click(self, selector: str) -> tuple[bool, str]:

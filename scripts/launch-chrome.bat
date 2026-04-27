@@ -38,8 +38,11 @@ if "%CHROME%"=="" (
     )
 )
 
+REM --remote-allow-origins is REQUIRED on Chrome 111+ or Chrome rejects
+REM the websocket handshake with 403 Forbidden. http://localhost:<port>
+REM is the narrowest allow-list that still lets BrowserBridge connect.
 set DEBUG_FLAG=
-if not "%CDP_PORT%"=="0" set DEBUG_FLAG=--remote-debugging-port=%CDP_PORT%
+if not "%CDP_PORT%"=="0" set DEBUG_FLAG=--remote-debugging-port=%CDP_PORT% --remote-allow-origins=http://localhost:%CDP_PORT%
 
 echo [launch-chrome] profile=%PROFILE_DIR% url=%START_URL% cdp-port=%CDP_PORT%
 "%CHROME%" --user-data-dir="%PROFILE_DIR%" --no-first-run --no-default-browser-check %DEBUG_FLAG% "%START_URL%"

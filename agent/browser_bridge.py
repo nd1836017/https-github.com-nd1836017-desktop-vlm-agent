@@ -69,20 +69,23 @@ class _CdpTarget:
 
     @property
     def is_real_page(self) -> bool:
-        """Skip Chrome's own UI tabs (devtools, extensions popup, etc.).
+        """Reject Chrome's own DevTools / extension tooling windows.
 
-        Real navigatable pages have ``http(s)://`` or ``about:`` URLs;
-        ``devtools://`` and ``chrome-extension://`` targets are tooling
-        windows we shouldn't drive.
+        ``/json`` already filters by ``type == "page"`` upstream, so by
+        the time we get here we have a real tab. The old implementation
+        gated on an allow-list of URL schemes (``http``, ``https``,
+        ``about:``, ``file://``) which rejected ``chrome://newtab/`` —
+        the most common starting point in a freshly-launched browser.
+        Now we only reject the schemes that are definitely tooling UIs
+        (``devtools://``) or extensions (``chrome-extension://``). The
+        first ``BROWSER_GO`` call will navigate the tab away from
+        ``chrome://newtab`` anyway; what matters is that we can attach
+        to it in the first place.
         """
         u = self.url
-        return (
-            u.startswith("http://")
-            or u.startswith("https://")
-            or u.startswith("about:")
-            or u.startswith("file://")
-            or u == ""
-        )
+        if u.startswith("devtools://"):
+            return False
+        return not u.startswith("chrome-extension://")
 
 
 class BrowserBridge:
@@ -303,8 +306,23 @@ class BrowserBridge:
             raise BrowserBridgeUnavailable(
                 "websocket-client package not installed; run pip install -r requirements.txt"
             ) from exc
+        # ``suppress_origin=True`` is load-bearing: Chrome 111+ enforces
+        # an Origin allow-list on the CDP websocket and rejects any
+        # connection whose ``Origin`` header doesn't match either
+        # ``--remote-allow-origins=<url>`` or ``=*``. The server-side
+        # advice is to pass ``--remote-allow-origins`` on launch; the
+        # client-side workaround is to not send an Origin at all (Chrome
+        # accepts originless connections since they can only come from
+        # something on the same machine that found the debug port). We
+        # set BOTH so the bridge works regardless of how the user
+        # launched Chrome (our launch-chrome.{sh,bat} pass the flag;
+        # a Chrome the user started manually probably doesn't).
         try:
-            ws = websocket.create_connection(ws_url, timeout=self._timeout)
+            ws = websocket.create_connection(
+                ws_url,
+                timeout=self._timeout,
+                suppress_origin=True,
+            )
         except Exception as exc:  # noqa: BLE001 — ws library raises broad
             raise BrowserBridgeUnavailable(
                 f"could not connect to {ws_url}: {exc}"

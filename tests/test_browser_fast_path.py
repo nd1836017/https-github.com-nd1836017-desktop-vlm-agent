@@ -498,3 +498,78 @@ def test_cdp_target_is_real_page_filters_devtools() -> None:
     )
     assert real.is_real_page is True
     assert fake.is_real_page is False
+
+
+def test_cdp_target_is_real_page_accepts_chrome_newtab() -> None:
+    # chrome://newtab/ is the default URL a freshly-launched Chrome
+    # opens, and is the first tab BrowserBridge would attach to. Rejecting
+    # it here would mean the bridge refuses to connect to a newly-launched
+    # browser until the user manually visits a page — which defeats the
+    # point of the fast path. See
+    # ``_CdpTarget.is_real_page`` docstring for the full reasoning.
+    for url in (
+        "chrome://newtab/",
+        "chrome://new-tab-page/",
+        "",
+        "about:blank",
+        "http://localhost:5173/",
+        "file:///tmp/page.html",
+    ):
+        target = _CdpTarget(target_id="t", url=url, websocket_url="ws://x")
+        assert target.is_real_page is True, f"expected real page: {url!r}"
+
+
+def test_cdp_target_is_real_page_rejects_extension_tooling() -> None:
+    for url in (
+        "devtools://devtools/bundled/inspector.html",
+        "chrome-extension://abcdef/options.html",
+    ):
+        target = _CdpTarget(target_id="t", url=url, websocket_url="ws://x")
+        assert target.is_real_page is False, f"expected tooling: {url!r}"
+
+
+def test_open_websocket_passes_suppress_origin(monkeypatch) -> None:
+    """Regression test for Chrome 111+ CDP origin-header rejection.
+
+    Chrome returns ``403 Forbidden`` on the websocket handshake unless
+    the connecting client either (a) is launched with
+    ``--remote-allow-origins`` matching the client's Origin, or
+    (b) doesn't send an Origin header at all. The bridge picks (b) so
+    the fast path still works when the user started Chrome manually
+    without the flag.
+
+    This test asserts ``suppress_origin=True`` is passed to
+    ``websocket.create_connection`` so nobody removes it accidentally.
+    """
+    import sys
+    import types
+
+    captured: dict = {}
+
+    class _FakeWs:
+        def send(self, *_a, **_kw) -> None:
+            pass
+
+        def recv(self) -> str:
+            return "{}"
+
+        def close(self) -> None:
+            pass
+
+    def fake_create_connection(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return _FakeWs()
+
+    fake_module = types.SimpleNamespace(create_connection=fake_create_connection)
+    monkeypatch.setitem(sys.modules, "websocket", fake_module)
+
+    bridge = BrowserBridge()
+    bridge._open_websocket("ws://localhost:29229/devtools/page/ABC")
+
+    assert captured["url"] == "ws://localhost:29229/devtools/page/ABC"
+    assert captured["kwargs"].get("suppress_origin") is True, (
+        "suppress_origin=True must be passed to websocket.create_connection "
+        "so Chrome 111+ doesn't reject the handshake with 403 Forbidden"
+    )
+    assert "timeout" in captured["kwargs"]

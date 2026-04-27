@@ -68,6 +68,12 @@ class Config:
     # error), ``manual`` (only honors inline ``[tag]`` prefixes you
     # write yourself), ``off`` (no router at all).
     task_routing_mode: str
+    # Task decomposition (TASK_DECOMPOSITION). One Gemini call at run
+    # start that splits compound natural-language steps ("play the 2nd
+    # video on youtube") into atomic substeps the planner can verify
+    # one at a time. Two values: ``auto`` (default; runs Gemini;
+    # graceful fallback on error), ``off`` (no decomposition).
+    task_decomposition_mode: str
 
     @classmethod
     def load(cls) -> Config:
@@ -132,6 +138,9 @@ class Config:
             browser_cdp_host=os.getenv("BROWSER_CDP_HOST", "localhost").strip(),
             browser_cdp_port=int(os.getenv("BROWSER_CDP_PORT", "29229")),
             task_routing_mode=os.getenv("TASK_ROUTING", "auto").strip().lower(),
+            task_decomposition_mode=os.getenv(
+                "TASK_DECOMPOSITION", "auto"
+            ).strip().lower(),
         )
         if cfg.rpd_warn_threshold >= cfg.rpd_halt_threshold:
             raise ValueError(
@@ -146,6 +155,11 @@ class Config:
             raise ValueError(
                 f"TASK_ROUTING must be one of auto/manual/off; "
                 f"got {cfg.task_routing_mode!r}"
+            )
+        if cfg.task_decomposition_mode not in {"auto", "off"}:
+            raise ValueError(
+                f"TASK_DECOMPOSITION must be one of auto/off; "
+                f"got {cfg.task_decomposition_mode!r}"
             )
         return cfg
 

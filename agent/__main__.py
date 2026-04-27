@@ -84,6 +84,36 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "ENABLE_TWO_STAGE_CLICK. Faster / cheaper; use for simple tasks."
         ),
     )
+    # Run replay dashboard. Mutually exclusive with running the agent —
+    # this just serves the existing artifacts directory and exits when
+    # interrupted.
+    p.add_argument(
+        "--serve-dashboard",
+        action="store_true",
+        help=(
+            "Serve the read-only run replay dashboard on localhost:8000 "
+            "instead of running the agent. Reads existing run artifacts "
+            "from RUN_ARTIFACTS_DIR (default 'runs/'). Requires fastapi "
+            "and uvicorn to be installed."
+        ),
+    )
+    p.add_argument(
+        "--dashboard-host",
+        default="127.0.0.1",
+        metavar="HOST",
+        help=(
+            "Bind address for --serve-dashboard. Defaults to 127.0.0.1 "
+            "(localhost only) so screenshots in the artifacts dir aren't "
+            "exposed on the network. Set to 0.0.0.0 to expose."
+        ),
+    )
+    p.add_argument(
+        "--dashboard-port",
+        type=int,
+        default=8000,
+        metavar="PORT",
+        help="Port for --serve-dashboard. Defaults to 8000.",
+    )
     return p.parse_args(argv)
 
 
@@ -102,6 +132,22 @@ def main(argv: list[str] | None = None) -> int:
         config = dataclasses.replace(config, enable_two_stage_click=args.two_stage_click)
 
     configure_logging(config.log_level)
+
+    if args.serve_dashboard:
+        # Lazy-import the dashboard so the regular agent path doesn't pull
+        # in FastAPI on every invocation.
+        from .dashboard import serve as serve_dashboard
+
+        try:
+            serve_dashboard(
+                config.run_artifacts_dir,
+                host=args.dashboard_host,
+                port=args.dashboard_port,
+            )
+        except RuntimeError as exc:
+            print(f"[dashboard error] {exc}", file=sys.stderr)
+            return 2
+        return 0
 
     if args.reset and not args.resume:
         reset_state(config.state_file)

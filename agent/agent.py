@@ -58,6 +58,12 @@ from .screen import (
     image_signature,
 )
 from .state import AgentState, load_state, save_state
+from .task_decomposer import (
+    apply_decomposer,
+)
+from .task_decomposer import (
+    parse_mode as parse_decomposition_mode,
+)
 from .task_router import (
     RoutingMode,
     apply_router,
@@ -1113,7 +1119,62 @@ def run(
             # rather than crashing on a None reference. close() is a
             # no-op when never connected.
 
-    # Checkpoint handling.
+    # Construct VLM + supporting infra BEFORE checkpoint validation,
+    # because the decomposer (which expands the step list) needs the
+    # VLM client and MUST run before checkpoint validation. If we
+    # validated the checkpoint against the pre-decomposition step
+    # count, every resume after a decomposition-expanded run would be
+    # rejected as "stale" (the saved total_steps is the post-decomp
+    # count). See PR #25 review feedback.
+    geometry = detect_geometry()
+    rpd_guard = RpdGuard(
+        rpd_limit=config.rpd_limit,
+        warn_threshold=config.rpd_warn_threshold,
+        halt_threshold=config.rpd_halt_threshold,
+    )
+    vlm = GeminiClient(
+        api_key=config.gemini_api_key,
+        model_name=config.gemini_model,
+        retry_max_attempts=config.gemini_retry_max_attempts,
+        retry_base_delay_seconds=config.gemini_retry_base_delay_seconds,
+        retry_max_delay_seconds=config.gemini_retry_max_delay_seconds,
+        enable_json_output=config.enable_json_output,
+        rpd_guard=rpd_guard,
+        image_max_dim=config.vlm_image_max_dim,
+        image_quality=config.vlm_image_quality,
+        skip_identical_frames=config.vlm_skip_identical_frames,
+        # Only advertise BROWSER_* commands to the planner when the
+        # bridge is actually connected. Otherwise the planner would
+        # emit BROWSER_GO on every navigation step, every attempt
+        # would FAIL, and replan budget would burn on doomed commands.
+        enable_browser_fast_path=(
+            browser_bridge is not None and browser_bridge.is_connected()
+        ),
+    )
+    history = History(window=config.history_window)
+    replan_counter = ReplanCounter(total_max=config.max_total_replans)
+    artifact_writer = ArtifactWriter.create(
+        enabled=config.save_run_artifacts,
+        base_dir=config.run_artifacts_dir,
+    )
+
+    # Task decomposition: one Gemini call at run start that splits any
+    # compound natural-language steps into atomic substeps. Runs BEFORE
+    # checkpoint validation so the validation compares against the
+    # post-decomposition step count — matching what was saved on the
+    # previous run. Falls back gracefully on error (original step list
+    # returned, run continues).
+    decomposition_mode = parse_decomposition_mode(
+        config.task_decomposition_mode
+    )
+    steps = apply_decomposer(
+        steps,
+        mode=decomposition_mode,
+        client=vlm,
+    )
+
+    # Checkpoint handling — runs against the POST-decomposition step
+    # count so a previous run's saved total_steps lines up.
     existing_state = load_state(config.state_file) if resume else None
     start_idx = 1
     if existing_state is not None:
@@ -1148,45 +1209,21 @@ def run(
                     variables.summary(),
                 )
         else:
+            # Step-count mismatch on resume usually means either the
+            # tasks file changed OR the decomposer's non-deterministic
+            # expansion came out to a different count than last run.
+            # Either way the saved offset can't be trusted; we restart
+            # from step 1 with a clear log line.
             log.warning(
-                "Ignoring stale checkpoint at %s (tasks file or step count changed).",
+                "Ignoring stale checkpoint at %s (tasks file or step "
+                "count changed: was total_steps=%d, now %d).",
                 config.state_file,
+                existing_state.total_steps,
+                len(steps),
             )
             state = AgentState.initial(config.tasks_file, len(steps))
     else:
         state = AgentState.initial(config.tasks_file, len(steps))
-
-    geometry = detect_geometry()
-    rpd_guard = RpdGuard(
-        rpd_limit=config.rpd_limit,
-        warn_threshold=config.rpd_warn_threshold,
-        halt_threshold=config.rpd_halt_threshold,
-    )
-    vlm = GeminiClient(
-        api_key=config.gemini_api_key,
-        model_name=config.gemini_model,
-        retry_max_attempts=config.gemini_retry_max_attempts,
-        retry_base_delay_seconds=config.gemini_retry_base_delay_seconds,
-        retry_max_delay_seconds=config.gemini_retry_max_delay_seconds,
-        enable_json_output=config.enable_json_output,
-        rpd_guard=rpd_guard,
-        image_max_dim=config.vlm_image_max_dim,
-        image_quality=config.vlm_image_quality,
-        skip_identical_frames=config.vlm_skip_identical_frames,
-        # Only advertise BROWSER_* commands to the planner when the
-        # bridge is actually connected. Otherwise the planner would
-        # emit BROWSER_GO on every navigation step, every attempt
-        # would FAIL, and replan budget would burn on doomed commands.
-        enable_browser_fast_path=(
-            browser_bridge is not None and browser_bridge.is_connected()
-        ),
-    )
-    history = History(window=config.history_window)
-    replan_counter = ReplanCounter(total_max=config.max_total_replans)
-    artifact_writer = ArtifactWriter.create(
-        enabled=config.save_run_artifacts,
-        base_dir=config.run_artifacts_dir,
-    )
 
     # Smart task router: one Gemini call to classify every step's
     # complexity and (where possible) suggest a literal command. The

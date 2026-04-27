@@ -397,6 +397,46 @@ click the first video
 
 The router fails open: any error (network, schema, timeout) drops back to no-routing behavior and logs a warning. A flaky router never blocks a run from starting.
 
+### Task decomposition (TASK_DECOMPOSITION)
+
+Runs **before** the router. One extra Gemini call at run start splits compound natural-language steps into atomic substeps the agent can verify one at a time. Without it, a single line like `play the 2nd video on youtube` reaches the planner as one step — the verifier then has to judge the whole compound goal off a single screenshot, which can produce false positives (e.g. autoplay running on YouTube's homepage being read as "the 2nd video is playing").
+
+Two modes (`TASK_DECOMPOSITION` env var):
+
+- `auto` (default) — runs Gemini; on any error the original step list is returned unchanged. Single-action lines pass through 1:1; compound lines emit 2-5 atomic substeps.
+- `off` — no decomposition. Use as a rollback or when you've already split your task by hand.
+
+Example expansion (auto mode):
+
+```
+play the 2nd video on youtube
+```
+
+becomes:
+
+```
+open a new Chrome tab
+go to youtube.com
+scroll the video grid into view
+click the second video result
+```
+
+Row metadata (`FOR_EACH_ROW`) and inline routing annotations (`[browser-fast]` etc.) are preserved across decomposition.
+
+### Run replay dashboard
+
+Read-only HTTP UI over the artifact directories saved by `SAVE_RUN_ARTIFACTS=true`. Launch with:
+
+```
+python -m agent --serve-dashboard
+```
+
+It binds to `127.0.0.1:8000` by default (localhost only — screenshots can contain sensitive content). Use `--dashboard-host 0.0.0.0` to expose, or `--dashboard-port` to change the port.
+
+The dashboard reads `RUN_ARTIFACTS_DIR` (default `runs/`) and shows a per-step timeline: the BEFORE screenshot the planner saw, the action it emitted, the AFTER screenshot, and the verifier's verdict. Failing steps are highlighted; you can click any screenshot to view at full resolution. Useful for diagnosing the kind of false-positive PASS verdicts described above.
+
+The dashboard requires `fastapi` and `uvicorn` (already in `requirements.txt`). The agent itself never imports them — they're lazy-loaded only when `--serve-dashboard` runs.
+
 ---
 
 ## Architecture

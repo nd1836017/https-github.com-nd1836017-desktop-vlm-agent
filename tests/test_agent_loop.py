@@ -39,6 +39,7 @@ class FakeClient:
         history_summary: str = "",
         previous_failure: str = "",
         extra_images=None,
+        routing_hint: str = "",
     ):
         self.plan_calls.append(
             {
@@ -125,6 +126,7 @@ def _cfg(tmp_path, tasks_text: str, **overrides) -> Config:
         browser_fast_path=False,
         browser_cdp_host="localhost",
         browser_cdp_port=29229,
+        task_routing_mode="off",
     )
     defaults.update(overrides)
     return Config(**defaults)

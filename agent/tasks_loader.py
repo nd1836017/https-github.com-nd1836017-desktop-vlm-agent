@@ -38,9 +38,11 @@ import csv
 import logging
 import re
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import StringIO
 from pathlib import Path
+
+from .task_router import RoutingHint, parse_inline_annotation
 
 log = logging.getLogger(__name__)
 
@@ -53,11 +55,20 @@ class TaskStep:
     what the planner will see. ``row_index`` is 1-indexed and ``None``
     outside a FOR_EACH_ROW block; ``csv_name`` is the basename of the CSV
     that drove this row.
+
+    ``routing_hint`` is the smart-router classification (``browser-fast``
+    / ``browser-vlm`` / ``desktop-vlm``) plus an optional
+    ``suggested_command``. Set by ``apply_router_hints`` AFTER load.
+    Inline ``[tag]`` annotations from tasks.txt are parsed at load time
+    and surface here as ``RoutingHint(source='manual', ...)`` — we do
+    that here (not in ``apply_router``) so the user-visible step text is
+    cleaned of the bracket prefix before any other code sees it.
     """
 
     text: str
     row_index: int | None = None
     csv_name: str | None = None
+    routing_hint: RoutingHint | None = None
 
 
 _FOR_EACH_RE = re.compile(
@@ -124,6 +135,35 @@ def load_steps(
     raw_text = path.read_text(encoding="utf-8-sig")
     lines = raw_text.splitlines()
     return _expand(lines, base_dir=path.parent, csv_override=csv_override)
+
+
+def attach_routing_hints(
+    steps: Sequence[TaskStep],
+    hints: Sequence[RoutingHint | None],
+) -> list[TaskStep]:
+    """Pair ``hints`` with ``steps`` to produce a new annotated list.
+
+    Used by the run loop after ``apply_router`` returns. Manual hints
+    (already attached at load time) BEAT auto hints — the user's
+    explicit ``[tag]`` annotation is always more authoritative than
+    the router's classification. ``hints`` longer or shorter than
+    ``steps`` is a programmer error and raises ``ValueError``.
+    """
+    if len(steps) != len(hints):
+        raise ValueError(
+            f"attach_routing_hints: {len(hints)} hints for {len(steps)} steps"
+        )
+    out: list[TaskStep] = []
+    for step, auto_hint in zip(steps, hints, strict=True):
+        if step.routing_hint is not None and step.routing_hint.source == "manual":
+            # Keep the manual annotation; auto-router doesn't override.
+            out.append(step)
+            continue
+        if auto_hint is None:
+            out.append(step)
+            continue
+        out.append(replace(step, routing_hint=auto_hint))
+    return out
 
 
 def _expand(
@@ -193,7 +233,8 @@ def _expand(
                     f"Line {lineno}: '{{{{row.<field>}}}}' placeholder used "
                     f"outside a FOR_EACH_ROW block (no CSV row to substitute)."
                 )
-            out.append(TaskStep(text=stripped))
+            hint, cleaned = parse_inline_annotation(stripped)
+            out.append(TaskStep(text=cleaned, routing_hint=hint))
 
     if in_block:
         raise TasksLoadError(
@@ -238,8 +279,17 @@ def _expand_block(
                 raise TasksLoadError(
                     f"Line {body_lineno} (row {row_idx} of {csv_path.name}): {exc}"
                 ) from None
+            # Strip inline routing annotations on FOR_EACH_ROW body lines too.
+            # The same ``[browser-fast] click submit`` syntax should work
+            # whether the line is inside or outside a loop.
+            hint, cleaned = parse_inline_annotation(text)
             expanded.append(
-                TaskStep(text=text, row_index=row_idx, csv_name=csv_name)
+                TaskStep(
+                    text=cleaned,
+                    row_index=row_idx,
+                    csv_name=csv_name,
+                    routing_hint=hint,
+                )
             )
     return expanded
 

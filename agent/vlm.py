@@ -735,6 +735,7 @@ class GeminiClient:
         history_summary: str = "",
         previous_failure: str = "",
         extra_images: list[bytes] | None = None,
+        routing_hint: str = "",
     ) -> tuple[str, Command | None]:
         """Ask the VLM what action to take for the given step.
 
@@ -771,6 +772,16 @@ class GeminiClient:
                 f"You also have {len(extra_images)} attached image(s) provided "
                 "by the previous step (CAPTURE_FOR_AI / FEED). Use them as "
                 "additional context."
+            )
+        if routing_hint:
+            # Smart-router classification (advisory). The router ran a
+            # one-shot decomposition pass at run start and tagged this
+            # step's likely complexity + suggested command. Treat it as
+            # a strong default but override if the screen disagrees —
+            # the router never sees the screen.
+            parts.append(
+                "Smart-router hint (advisory; override if the screen "
+                f"disagrees): {routing_hint}"
             )
         parts.append(f"Current step: {step}")
 
@@ -1082,6 +1093,51 @@ class GeminiClient:
         text = (response.text or "").strip()
         log.debug("extract_value response: %r", text)
         return self._parse_extract_text(text)
+
+    def call_router_raw(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        response_schema: type[BaseModel],
+    ):
+        """Wrap a single Gemini structured-output call for the task router.
+
+        Lives on the client (not the router module) so it goes through
+        the existing ``_call_with_retry`` + RPD-counter machinery — the
+        router shouldn't get to bypass quota tracking by talking to
+        Gemini directly. Returns the parsed Pydantic model on success.
+        Any failure (network, schema, timeout) raises an exception the
+        router converts to ``RouterUnavailable`` so the agent's run
+        loop can fall back to no hints.
+
+        Plain-text response with response_schema set is the same pattern
+        as the rest of the JSON-output paths in this client (verify,
+        plan, extract). No image is sent — the router operates on
+        textual step descriptions only.
+        """
+        from .task_router import RouterUnavailable
+
+        config = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            response_mime_type="application/json",
+            response_schema=response_schema,
+        )
+        response = self._generate("task_router", [user_prompt], config)
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, response_schema):
+            return parsed
+        # Fallback path: SDK didn't materialize ``response.parsed`` but
+        # the raw text should still be JSON. Validate manually.
+        text = (response.text or "").strip()
+        if not text:
+            raise RouterUnavailable("router returned empty response")
+        try:
+            return response_schema.model_validate_json(text)
+        except ValidationError as exc:
+            raise RouterUnavailable(
+                f"router schema validation failed: {exc}"
+            ) from exc
 
     @staticmethod
     def _parse_extract_text(text: str) -> ExtractionResult:

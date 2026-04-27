@@ -403,6 +403,88 @@ def test_resume_ignored_if_tasks_file_changed(
     assert len(client.plan_calls) == 3
 
 
+def test_resume_after_decomposition_expansion_succeeds(
+    fake_geometry, patch_pyautogui, tmp_path
+):
+    """Regression test for PR #25 review feedback.
+
+    Before the fix, checkpoint validation ran BEFORE the decomposer.
+    First run: 2 pre-decomp steps -> 4 post-decomp -> checkpoint saved
+    with total_steps=4. Resume: load_steps returns 2, validation
+    compares 4 != 2 -> reject as 'stale' -> restart from step 1, lose
+    variables. After the fix: vlm + decomposer run before checkpoint
+    validation, so total_steps lines up post-decomp.
+    """
+    cfg = _cfg(
+        tmp_path,
+        "compound A\ncompound B\n",
+        max_replans_per_step=0,
+        task_decomposition_mode="auto",  # exercise the fix path
+    )
+
+    # Stub the decomposer: each input step expands to 2 atomic substeps.
+    def stub_apply_decomposer(steps, *, mode, client):
+        from dataclasses import replace
+
+        out = []
+        for s in steps:
+            out.append(replace(s, text=f"{s.text} part 1"))
+            out.append(replace(s, text=f"{s.text} part 2"))
+        return out
+
+    # First run: 2 pre-decomp -> 4 post-decomp. Pass first 2, fail the
+    # 3rd, so the checkpoint records last_completed_step=2 of total=4.
+    client1 = FakeClient(
+        plan_outputs=["CLICK [1,1]", "CLICK [2,2]", "CLICK [3,3]"],
+        verify_outputs=[
+            VerificationResult(passed=True, reason="PASS"),
+            VerificationResult(passed=True, reason="PASS"),
+            VerificationResult(passed=False, reason="FAIL"),
+        ],
+    )
+    with (
+        mock.patch("agent.agent.GeminiClient", return_value=client1),
+        mock.patch("agent.agent.detect_geometry", return_value=fake_geometry),
+        mock.patch(
+            "agent.agent.apply_decomposer", side_effect=stub_apply_decomposer
+        ),
+    ):
+        exit_code1 = run(cfg)
+    assert exit_code1 == 1
+    state = load_state(cfg.state_file)
+    assert state is not None
+    # Checkpoint records the post-decomposition count (4), not pre (2).
+    assert state.total_steps == 4
+    assert state.last_completed_step == 2
+
+    # Resume: should pick up at step 3 of 4 (NOT restart from step 1).
+    # If checkpoint validation ran against the pre-decomp count (2 != 4),
+    # this test would observe the FakeClient receiving 4 plan calls
+    # instead of the 2 we expect.
+    client2 = FakeClient(
+        plan_outputs=["CLICK [3,3]", "CLICK [4,4]"],
+        verify_outputs=[
+            VerificationResult(passed=True, reason="PASS"),
+            VerificationResult(passed=True, reason="PASS"),
+        ],
+    )
+    with (
+        mock.patch("agent.agent.GeminiClient", return_value=client2),
+        mock.patch("agent.agent.detect_geometry", return_value=fake_geometry),
+        mock.patch(
+            "agent.agent.apply_decomposer", side_effect=stub_apply_decomposer
+        ),
+    ):
+        exit_code2 = run(cfg, resume=True)
+
+    assert exit_code2 == 0
+    # Only 2 steps re-executed (steps 3 and 4 of the post-decomp 4).
+    # The fix is what makes this assertion hold; pre-fix this would be 4.
+    assert len(client2.plan_calls) == 2
+    assert client2.plan_calls[0]["step"] == "compound B part 1"  # step 3
+    assert client2.plan_calls[1]["step"] == "compound B part 2"  # step 4
+
+
 # -----------------------------------------------------------------------------
 # Graceful error handling when the tasks file is missing (regression test).
 # -----------------------------------------------------------------------------

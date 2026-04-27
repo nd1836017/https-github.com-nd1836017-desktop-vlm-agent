@@ -1119,49 +1119,13 @@ def run(
             # rather than crashing on a None reference. close() is a
             # no-op when never connected.
 
-    # Checkpoint handling.
-    existing_state = load_state(config.state_file) if resume else None
-    start_idx = 1
-    if existing_state is not None:
-        if (
-            existing_state.tasks_file == str(config.tasks_file)
-            and existing_state.total_steps == len(steps)
-            and 0 <= existing_state.last_completed_step < len(steps)
-        ):
-            start_idx = existing_state.last_completed_step + 1
-            log.info(
-                "Resuming from checkpoint: step %d/%d (file=%s)",
-                start_idx,
-                len(steps),
-                config.state_file,
-            )
-            state = existing_state
-            # Rehydrate variables from the checkpoint when this run uses
-            # them. Skipping the rehydrate when ``features.uses_variables``
-            # is False keeps the unused store empty + drops any stale
-            # entries that no longer correspond to a REMEMBER step.
-            if variables is not None and existing_state.variables is not None:
-                # Use ``is not None`` rather than truthy: an empty
-                # ``{}`` is a valid checkpoint (the previous run hadn't
-                # called REMEMBER yet) and rehydrating it preserves
-                # the run's identity. The truthy check skipped this
-                # legitimate case and silently dropped the persisted
-                # store.
-                variables = VariableStore.from_dict(existing_state.variables)
-                log.info(
-                    "Restored %d variable(s) from checkpoint: %s",
-                    len(variables),
-                    variables.summary(),
-                )
-        else:
-            log.warning(
-                "Ignoring stale checkpoint at %s (tasks file or step count changed).",
-                config.state_file,
-            )
-            state = AgentState.initial(config.tasks_file, len(steps))
-    else:
-        state = AgentState.initial(config.tasks_file, len(steps))
-
+    # Construct VLM + supporting infra BEFORE checkpoint validation,
+    # because the decomposer (which expands the step list) needs the
+    # VLM client and MUST run before checkpoint validation. If we
+    # validated the checkpoint against the pre-decomposition step
+    # count, every resume after a decomposition-expanded run would be
+    # rejected as "stale" (the saved total_steps is the post-decomp
+    # count). See PR #25 review feedback.
     geometry = detect_geometry()
     rpd_guard = RpdGuard(
         rpd_limit=config.rpd_limit,
@@ -1196,40 +1160,70 @@ def run(
 
     # Task decomposition: one Gemini call at run start that splits any
     # compound natural-language steps into atomic substeps. Runs BEFORE
-    # the smart router so the router classifies the post-decomposition
-    # atomic steps, not the original compound lines. Falls back
-    # gracefully on error — we keep the original step list. When the
-    # expanded count differs from the original, we MUST reset/re-init
-    # the AgentState because total_steps is checkpointed and used for
-    # the resume validation. A different post-expansion count
-    # invalidates any previous resume target.
+    # checkpoint validation so the validation compares against the
+    # post-decomposition step count — matching what was saved on the
+    # previous run. Falls back gracefully on error (original step list
+    # returned, run continues).
     decomposition_mode = parse_decomposition_mode(
         config.task_decomposition_mode
     )
-    pre_decomp_count = len(steps)
     steps = apply_decomposer(
         steps,
         mode=decomposition_mode,
         client=vlm,
     )
-    if len(steps) != pre_decomp_count:
-        # Count changed -> any prior checkpoint is no longer valid
-        # against the current expanded plan. Drop the resume offset
-        # and re-init AgentState with the new count. The user gets a
-        # clear log line so they aren't surprised.
-        if start_idx > 1:
-            log.warning(
-                "Decomposer expanded %d step(s) to %d; the prior "
-                "checkpoint at step %d is no longer valid. Restarting "
-                "from step 1.",
-                pre_decomp_count,
-                len(steps),
+
+    # Checkpoint handling — runs against the POST-decomposition step
+    # count so a previous run's saved total_steps lines up.
+    existing_state = load_state(config.state_file) if resume else None
+    start_idx = 1
+    if existing_state is not None:
+        if (
+            existing_state.tasks_file == str(config.tasks_file)
+            and existing_state.total_steps == len(steps)
+            and 0 <= existing_state.last_completed_step < len(steps)
+        ):
+            start_idx = existing_state.last_completed_step + 1
+            log.info(
+                "Resuming from checkpoint: step %d/%d (file=%s)",
                 start_idx,
+                len(steps),
+                config.state_file,
             )
-            start_idx = 1
+            state = existing_state
+            # Rehydrate variables from the checkpoint when this run uses
+            # them. Skipping the rehydrate when ``features.uses_variables``
+            # is False keeps the unused store empty + drops any stale
+            # entries that no longer correspond to a REMEMBER step.
+            if variables is not None and existing_state.variables is not None:
+                # Use ``is not None`` rather than truthy: an empty
+                # ``{}`` is a valid checkpoint (the previous run hadn't
+                # called REMEMBER yet) and rehydrating it preserves
+                # the run's identity. The truthy check skipped this
+                # legitimate case and silently dropped the persisted
+                # store.
+                variables = VariableStore.from_dict(existing_state.variables)
+                log.info(
+                    "Restored %d variable(s) from checkpoint: %s",
+                    len(variables),
+                    variables.summary(),
+                )
+        else:
+            # Step-count mismatch on resume usually means either the
+            # tasks file changed OR the decomposer's non-deterministic
+            # expansion came out to a different count than last run.
+            # Either way the saved offset can't be trusted; we restart
+            # from step 1 with a clear log line.
+            log.warning(
+                "Ignoring stale checkpoint at %s (tasks file or step "
+                "count changed: was total_steps=%d, now %d).",
+                config.state_file,
+                existing_state.total_steps,
+                len(steps),
+            )
+            state = AgentState.initial(config.tasks_file, len(steps))
+    else:
         state = AgentState.initial(config.tasks_file, len(steps))
-        if variables is not None:
-            state = state.with_variables(variables.to_dict())
 
     # Smart task router: one Gemini call to classify every step's
     # complexity and (where possible) suggest a literal command. The

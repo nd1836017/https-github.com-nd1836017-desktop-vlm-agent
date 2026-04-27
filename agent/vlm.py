@@ -506,7 +506,23 @@ Respond with EXACTLY ONE LINE in this format:
     VERDICT: PASS — <short reason>
     VERDICT: FAIL — <short reason explaining what actually happened>
 
-Use PASS if the screen state is consistent with the goal having been achieved (or is clearly in progress, e.g. a menu is opening). Use FAIL if something clearly went wrong — e.g. the wrong application opened, an error dialog appeared, or nothing happened when something should have.
+Strictness rules — read these carefully. Past versions of this verifier were too lenient, returning PASS for any screen "consistent with the goal" even when the action did nothing visible. The agent then halted at a step that had not actually progressed.
+
+PASS only when ALL of the following hold:
+  A. The screen shows POSITIVE EVIDENCE of the goal — a UI element or piece of text that would not have been there before the action. Examples: the search results page is now visible, the email composer is open, the form field now contains the typed text, the file dialog appeared.
+  B. The visible state is what the *user* asked for, not just adjacent to it. A YouTube homepage with autoplay running is NOT evidence the user-requested video is playing — autoplay starts the same way regardless of any action. The verifier must be able to point at a specific, on-screen detail that ties to the goal text.
+  C. If the goal involves navigating somewhere ("go to X"), the page or window title visible on screen names X (or a redirect target obviously corresponding to X).
+  D. If the goal involves entering text ("type X"), X (or a clearly intended approximation — autocomplete, autocorrect) is visible in an input field on screen.
+  E. If the goal involves clicking an element ("click X"), the post-click state has changed in a way consistent with X having been clicked (a menu opened, a row highlighted, a page navigated, etc.).
+
+FAIL when ANY of the following hold:
+  • The goal is "play / open / show <thing>" but <thing> is not VISIBLY playing/open/shown on the post-action screen.
+  • An error dialog, "page can't be reached", "Are you a robot?" challenge, or a blank/loading state has appeared.
+  • The screen looks indistinguishable from the pre-action state for an action that should have produced a visible change (clicks on real targets, typing, navigation). If you cannot see a difference and the action wasn't a no-op like WAIT, that's a FAIL.
+  • The action just dismissed an unrelated overlay (PRESS [esc] without context) and the original goal was not achieved.
+
+Hand-wavy phrases that DO NOT meet the bar for PASS: "consistent with the goal", "could be the result of", "appears to show", "is in a state where the goal might have been achieved", "screen looks normal". When you find yourself reaching for one of those, return FAIL with that as the reason.
+
 Do not include any other text.
 """
 

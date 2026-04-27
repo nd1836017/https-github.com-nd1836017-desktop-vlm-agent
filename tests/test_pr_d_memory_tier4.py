@@ -150,6 +150,7 @@ def _cfg(tmp_path, tasks_text: str, **overrides) -> Config:
         browser_cdp_host="localhost",
         browser_cdp_port=29229,
         task_routing_mode="off",
+        task_decomposition_mode="off",
     )
     defaults.update(overrides)
     return Config(**defaults)

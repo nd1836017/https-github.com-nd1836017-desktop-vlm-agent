@@ -58,6 +58,12 @@ from .screen import (
     image_signature,
 )
 from .state import AgentState, load_state, save_state
+from .task_decomposer import (
+    apply_decomposer,
+)
+from .task_decomposer import (
+    parse_mode as parse_decomposition_mode,
+)
 from .task_router import (
     RoutingMode,
     apply_router,
@@ -1187,6 +1193,43 @@ def run(
         enabled=config.save_run_artifacts,
         base_dir=config.run_artifacts_dir,
     )
+
+    # Task decomposition: one Gemini call at run start that splits any
+    # compound natural-language steps into atomic substeps. Runs BEFORE
+    # the smart router so the router classifies the post-decomposition
+    # atomic steps, not the original compound lines. Falls back
+    # gracefully on error — we keep the original step list. When the
+    # expanded count differs from the original, we MUST reset/re-init
+    # the AgentState because total_steps is checkpointed and used for
+    # the resume validation. A different post-expansion count
+    # invalidates any previous resume target.
+    decomposition_mode = parse_decomposition_mode(
+        config.task_decomposition_mode
+    )
+    pre_decomp_count = len(steps)
+    steps = apply_decomposer(
+        steps,
+        mode=decomposition_mode,
+        client=vlm,
+    )
+    if len(steps) != pre_decomp_count:
+        # Count changed -> any prior checkpoint is no longer valid
+        # against the current expanded plan. Drop the resume offset
+        # and re-init AgentState with the new count. The user gets a
+        # clear log line so they aren't surprised.
+        if start_idx > 1:
+            log.warning(
+                "Decomposer expanded %d step(s) to %d; the prior "
+                "checkpoint at step %d is no longer valid. Restarting "
+                "from step 1.",
+                pre_decomp_count,
+                len(steps),
+                start_idx,
+            )
+            start_idx = 1
+        state = AgentState.initial(config.tasks_file, len(steps))
+        if variables is not None:
+            state = state.with_variables(variables.to_dict())
 
     # Smart task router: one Gemini call to classify every step's
     # complexity and (where possible) suggest a literal command. The

@@ -38,9 +38,17 @@ echo "[launch-chrome] profile=${PROFILE_DIR} url=${START_URL} cdp-port=${CDP_POR
 # the active tab without going through the VLM. Harmless when the agent
 # isn't using the fast path; only listens on localhost so it isn't a
 # remote-attack surface. Set CDP_PORT=0 to disable explicitly.
+#
+# --remote-allow-origins is REQUIRED on Chrome 111+ — without it Chrome
+# rejects the websocket handshake with "403 Forbidden" unless the
+# connecting client omits the Origin header entirely. We use
+# http://localhost:<port> as the narrowest allow-list that still lets
+# the bridge connect. (The bridge ALSO passes suppress_origin=True for
+# older / non-script-launched Chromes, but setting this flag here
+# matches documented Chromium guidance.)
 DEBUG_FLAG=""
 if [[ "${CDP_PORT}" != "0" ]]; then
-    DEBUG_FLAG="--remote-debugging-port=${CDP_PORT}"
+    DEBUG_FLAG="--remote-debugging-port=${CDP_PORT} --remote-allow-origins=http://localhost:${CDP_PORT}"
 fi
 exec "${CHROME}" \
     --user-data-dir="${PROFILE_DIR}" \

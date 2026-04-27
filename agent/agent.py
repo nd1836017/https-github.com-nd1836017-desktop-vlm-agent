@@ -447,13 +447,19 @@ def _attempt_step(
     """
     if extra_images is None:
         extra_images = []
+    # Capture the baseline screenshot ONCE for this attempt — every
+    # parse retry must see the same visual state the original plan was
+    # made for. Re-capturing on each retry meant a tooltip / animation
+    # / cursor blink between attempts would silently change the screen
+    # the next plan was generated from, so the verifier was sometimes
+    # checking a different scene than the planner saw.
+    screenshot = capture_screenshot()
+    if artifact_writer is not None:
+        artifact_writer.save_before(step_idx, screenshot)
     attempts = 0
     last_parse_error = ""
     while attempts <= max_parse_retries:
         attempts += 1
-        screenshot = capture_screenshot()
-        if artifact_writer is not None:
-            artifact_writer.save_before(step_idx, screenshot)
         raw, cmd = vlm.plan_action(
             step,
             screenshot,
@@ -1011,6 +1017,7 @@ def run(
     csv_override: Path | None = None,
     cli_file_mode: FileMode | None = None,
     cli_workdir: Path | None = None,
+    pause_handler: Callable[[str], bool] | None = None,
 ) -> int:
     try:
         steps = load_steps(config.tasks_file, csv_override=csv_override)
@@ -1127,7 +1134,13 @@ def run(
             # them. Skipping the rehydrate when ``features.uses_variables``
             # is False keeps the unused store empty + drops any stale
             # entries that no longer correspond to a REMEMBER step.
-            if variables is not None and existing_state.variables:
+            if variables is not None and existing_state.variables is not None:
+                # Use ``is not None`` rather than truthy: an empty
+                # ``{}`` is a valid checkpoint (the previous run hadn't
+                # called REMEMBER yet) and rehydrating it preserves
+                # the run's identity. The truthy check skipped this
+                # legitimate case and silently dropped the persisted
+                # store.
                 variables = VariableStore.from_dict(existing_state.variables)
                 log.info(
                     "Restored %d variable(s) from checkpoint: %s",
@@ -1182,7 +1195,13 @@ def run(
     # TaskSteps at load time and are NEVER overwritten by the auto
     # router — the user's explicit annotation always wins.
     routing_mode = parse_routing_mode(config.task_routing_mode)
-    if routing_mode != RoutingMode.OFF:
+    if routing_mode == RoutingMode.AUTO:
+        # Only AUTO actually calls Gemini. MANUAL mode's hints were
+        # already attached at load time and ``apply_router`` is a no-op
+        # there — calling it just iterates the steps to produce a list
+        # of ``None`` hints we'd then re-attach. Skip the round-trip
+        # entirely; manual annotations stay intact on the TaskStep
+        # objects we got from ``load_steps``.
         bridge_ready = (
             browser_bridge is not None and browser_bridge.is_connected()
         )
@@ -1193,6 +1212,10 @@ def run(
             enable_browser_fast_path=bridge_ready,
         )
         steps = attach_routing_hints(steps, auto_hints)
+    if routing_mode != RoutingMode.OFF:
+        # Log the resolved routing summary in both AUTO and MANUAL
+        # so the user can see what the planner is going to receive
+        # — even when the router itself didn't run.
         _log_routing_summary(steps, mode=routing_mode)
 
     log.info(
@@ -1280,6 +1303,7 @@ def run(
                 stuck_step_threshold=config.stuck_step_threshold,
                 browser_bridge=browser_bridge,
                 routing_hint=hint_text,
+                pause_handler=pause_handler,
             )
 
             # action_text is resolved inside the writer from the most recent

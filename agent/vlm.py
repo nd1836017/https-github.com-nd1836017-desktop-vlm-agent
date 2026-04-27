@@ -829,11 +829,15 @@ class GeminiClient:
                 current_signature[:8],
             )
         # Update the tracker so consecutive identical replan attempts
-        # keep skipping. The skip condition above already requires
-        # ``is_replan``, so a stale per-run signature can never leak
-        # into a fresh step's first plan call regardless of what we
-        # store here.
-        if current_signature is not None:
+        # keep skipping. We only update when the screenshot was actually
+        # sent: when ``send_screenshot=False`` fired we never re-fed the
+        # frame to the model, so storing its signature would let a
+        # stale-skip persist across boundaries even though the planner
+        # never confirmed the visual state. The skip condition above
+        # already requires ``is_replan``, so a stale per-run signature
+        # can never leak into a fresh step's first plan call regardless
+        # of what we store here either.
+        if current_signature is not None and send_screenshot:
             self._last_planner_signature = current_signature
 
         # Decode any feed-buffer bytes into PIL Images alongside the live

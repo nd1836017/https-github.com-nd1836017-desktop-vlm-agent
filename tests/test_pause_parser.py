@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from agent.parser import (
-    ClickCommand,
     PauseCommand,
     parse_command,
 )
@@ -36,10 +35,20 @@ def test_pause_preferred_over_click():
     assert isinstance(cmd, PauseCommand)
 
 
-def test_empty_pause_falls_back():
-    # Empty reason shouldn't match — caller will fall through to other patterns.
-    cmd = parse_command("PAUSE []  then CLICK [100,200]")
-    assert isinstance(cmd, ClickCommand)
+def test_empty_pause_uses_default_reason():
+    # An empty reason is still a clear pause request from the planner;
+    # earlier behavior silently dropped through to CLICK and the run
+    # continued. We now surface a default reason so the human at least
+    # gets a prompt.
+    cmd = parse_command("PAUSE []")
+    assert isinstance(cmd, PauseCommand)
+    assert cmd.reason == "manual pause requested"
+
+
+def test_pause_whitespace_only_uses_default_reason():
+    cmd = parse_command("PAUSE [   ]")
+    assert isinstance(cmd, PauseCommand)
+    assert cmd.reason == "manual pause requested"
 
 
 def test_pause_with_prose_wrapping():

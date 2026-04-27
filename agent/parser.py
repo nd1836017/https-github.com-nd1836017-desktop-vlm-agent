@@ -324,7 +324,7 @@ _CLICK_RE = re.compile(
     re.IGNORECASE,
 )
 _PRESS_RE = re.compile(r"PRESS\s*\[\s*([^\]\n]+?)\s*\]", re.IGNORECASE)
-_TYPE_RE = re.compile(r"TYPE\s*\[\s*(.*?)\s*\]", re.IGNORECASE | re.DOTALL)
+_TYPE_RE = re.compile(r"TYPE\s*\[\s*(.*?)\s*\]", re.IGNORECASE)
 _SCROLL_RE = re.compile(
     r"SCROLL\s*\[\s*(up|down|UP|DOWN)\s*,\s*(-?\d+)\s*\]",
     re.IGNORECASE,
@@ -435,8 +435,11 @@ def parse_command(response: str) -> Command | None:
         m = _PAUSE_RE.search(response)
         if m:
             reason = m.group(1).strip()
-            if reason:
-                return PauseCommand(reason=reason)
+            # An empty PAUSE bracket (``PAUSE []``) is still a valid pause
+            # signal — the planner clearly wants to hand off to the human
+            # but didn't articulate why. Falling through silently meant
+            # the run would just continue, which defeats the purpose.
+            return PauseCommand(reason=reason or "manual pause requested")
 
         # File primitives. Tried before CLICK_TEXT because their bracket
         # args can contain spaces / dots that would otherwise read as a
@@ -539,7 +542,21 @@ def parse_command(response: str) -> Command | None:
         m = _SCROLL_RE.search(response)
         if m:
             direction = m.group(1).lower()
-            amount = abs(int(m.group(2)))
+            raw_amount = int(m.group(2))
+            # The planner sometimes emits a negative amount (e.g.
+            # ``SCROLL [down, -5]``) when it confuses sign with
+            # direction. Silently abs()-ing hides the bug; warn loudly
+            # but still salvage the action so a single bad emit
+            # doesn't burn the replan budget.
+            if raw_amount < 0:
+                log.warning(
+                    "SCROLL emitted with negative amount %d; treating as %d. "
+                    "Direction (up/down) already controls sign — the second "
+                    "argument should always be positive.",
+                    raw_amount,
+                    abs(raw_amount),
+                )
+            amount = abs(raw_amount)
             return ScrollCommand(direction=direction, amount=amount)
 
         m = _DRAG_RE.search(response)

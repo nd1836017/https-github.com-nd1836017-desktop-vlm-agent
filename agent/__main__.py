@@ -114,11 +114,94 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="PORT",
         help="Port for --serve-dashboard. Defaults to 8000.",
     )
+    # Skill library helpers — these short-circuit the run loop so they
+    # work even when GEMINI_API_KEY isn't set (handy for first-time
+    # users authoring skills before connecting an API key).
+    p.add_argument(
+        "--list-skills",
+        action="store_true",
+        help=(
+            "List every skill available under SKILLS_DIR (with a "
+            "one-line preview) and exit. Useful for discovering what "
+            "skills are already available before authoring new ones."
+        ),
+    )
+    p.add_argument(
+        "--new-skill",
+        dest="new_skill",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Scaffold a starter skill at SKILLS_DIR/<NAME>.txt and "
+            "exit. The starter file includes a header comment plus an "
+            "example BROWSER_GO so you can run it immediately. "
+            "Refuses to overwrite an existing skill unless "
+            "--overwrite-skill is also supplied."
+        ),
+    )
+    p.add_argument(
+        "--overwrite-skill",
+        action="store_true",
+        help=(
+            "When used with --new-skill, replace any existing skill "
+            "file with the same name. No effect on its own."
+        ),
+    )
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+
+    # Skill helpers run BEFORE Config.load() so they work without a
+    # configured GEMINI_API_KEY. They only need SKILLS_DIR (or its
+    # default ./skills/), which we resolve directly here.
+    if args.list_skills or args.new_skill is not None:
+        from .config import _env_skills_dir
+        from .skills import (
+            DEFAULT_SKILLS_DIR_NAME,
+            SkillError,
+            list_skills,
+            scaffold_skill,
+        )
+
+        skills_dir = _env_skills_dir() or Path(DEFAULT_SKILLS_DIR_NAME)
+        if args.list_skills:
+            infos = list_skills(skills_dir)
+            if not infos:
+                print(
+                    f"No skills found in {skills_dir}. "
+                    f"Create one with: python -m agent --new-skill <name>"
+                )
+                return 0
+            print(f"Skills in {skills_dir}:")
+            name_width = max((len(i.name) for i in infos), default=10)
+            for info in infos:
+                print(
+                    f"  {info.name:<{name_width}}  "
+                    f"({info.line_count} lines)  "
+                    f"{info.preview}"
+                )
+            print(
+                "\nUse a skill from any tasks file with `USE <name>`."
+            )
+            return 0
+        # --new-skill <name>
+        try:
+            target = scaffold_skill(
+                skills_dir,
+                args.new_skill,
+                overwrite=args.overwrite_skill,
+            )
+        except SkillError as exc:
+            print(f"[skill error] {exc}", file=sys.stderr)
+            return 2
+        print(f"Scaffolded new skill: {target}")
+        print(
+            f"Edit it, then add `USE {args.new_skill}` to any tasks file."
+        )
+        return 0
+
     try:
         config = Config.load()
     except (RuntimeError, ValueError) as exc:

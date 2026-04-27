@@ -151,6 +151,9 @@ def _cfg(tmp_path, tasks_text: str, **overrides) -> Config:
         browser_cdp_port=29229,
         task_routing_mode="off",
         task_decomposition_mode="off",
+        skills_dir=None,
+        wait_until_timeout_seconds=30.0,
+        wait_until_poll_seconds=2.0,
     )
     defaults.update(overrides)
     return Config(**defaults)

@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -146,6 +146,191 @@ def _handle_pause(reason: str) -> bool:
     except (EOFError, KeyboardInterrupt):
         return False
     return answer != "q"
+
+
+def _find_if_begin_index(steps: Sequence[TaskStep], block_id: int) -> int | None:
+    """Return the 1-based index of the ``if_begin`` step for ``block_id``.
+
+    Used by the resume path to rewind into an IF block so the condition
+    is re-evaluated. Returns ``None`` when no matching if_begin exists,
+    which would only happen on a malformed step list (programmer error
+    rather than a parse error — the loader rejects unmatched IF / END_IF
+    at parse time).
+    """
+    for idx, step in enumerate(steps, start=1):
+        if step.control_kind == "if_begin" and step.block_id == block_id:
+            return idx
+    return None
+
+
+def _maybe_handle_control(
+    *,
+    task_step: TaskStep,
+    idx: int,
+    total_steps: int,
+    vlm: GeminiClient,
+    geometry: ScreenGeometry,
+    branch_decisions: dict[int, bool],
+    wait_until_timeout_seconds: float,
+    wait_until_poll_seconds: float,
+) -> VerificationResult | None:
+    """Handle control-flow directives and skipped-branch steps.
+
+    Returns:
+        ``None`` if this is a normal action step that should continue
+        through the planner/executor path.
+        ``VerificationResult`` (passed=True) for control directives or
+        steps inside a non-taken branch — the run loop should treat the
+        step as completed without calling the planner.
+        ``VerificationResult`` (passed=False) only for WAIT_UNTIL on
+        timeout, which becomes a HALT.
+    """
+    kind = task_step.control_kind
+
+    # IF [text] THEN — evaluate the condition and store the decision.
+    if kind == "if_begin":
+        assert task_step.block_id is not None
+        assert task_step.condition_text is not None
+        log.info(
+            "IF [%s]: evaluating against current screen…",
+            task_step.condition_text,
+        )
+        decision = _evaluate_condition_via_screenshot(
+            text=task_step.condition_text,
+            vlm=vlm,
+            geometry=geometry,
+            label=f"IF (step {idx}/{total_steps})",
+        )
+        branch_decisions[task_step.block_id] = decision
+        log.info(
+            "IF [%s] → %s branch.",
+            task_step.condition_text,
+            "THEN" if decision else "ELSE",
+        )
+        return VerificationResult(
+            passed=True,
+            reason=(
+                f"IF [{task_step.condition_text}] -> "
+                f"{'THEN' if decision else 'ELSE'}"
+            ),
+        )
+
+    # ELSE / END_IF — pure markers, no work.
+    if kind == "if_else":
+        return VerificationResult(passed=True, reason="ELSE marker")
+    if kind == "if_end":
+        return VerificationResult(passed=True, reason="END_IF marker")
+
+    # WAIT_UNTIL [text] — poll the screen until the condition is true
+    # or the timeout expires.
+    if kind == "wait_until":
+        assert task_step.condition_text is not None
+        timeout = (
+            task_step.wait_timeout_seconds
+            if task_step.wait_timeout_seconds is not None
+            else wait_until_timeout_seconds
+        )
+        poll = (
+            task_step.wait_poll_seconds
+            if task_step.wait_poll_seconds is not None
+            else wait_until_poll_seconds
+        )
+        deadline = time.monotonic() + timeout
+        attempt = 0
+        log.info(
+            "WAIT_UNTIL [%s]: polling every %.1fs (timeout %.1fs).",
+            task_step.condition_text,
+            poll,
+            timeout,
+        )
+        while True:
+            attempt += 1
+            label = (
+                f"WAIT_UNTIL (step {idx}/{total_steps}, attempt {attempt})"
+            )
+            if _evaluate_condition_via_screenshot(
+                text=task_step.condition_text,
+                vlm=vlm,
+                geometry=geometry,
+                label=label,
+            ):
+                log.info(
+                    "WAIT_UNTIL [%s] satisfied after %d attempt(s).",
+                    task_step.condition_text,
+                    attempt,
+                )
+                return VerificationResult(
+                    passed=True,
+                    reason=(
+                        f"WAIT_UNTIL [{task_step.condition_text}] "
+                        f"satisfied after {attempt} attempt(s)"
+                    ),
+                )
+            if time.monotonic() >= deadline:
+                return VerificationResult(
+                    passed=False,
+                    reason=(
+                        f"WAIT_UNTIL [{task_step.condition_text}] timed out "
+                        f"after {timeout:.1f}s ({attempt} attempt(s))"
+                    ),
+                )
+            time.sleep(poll)
+
+    # Non-control step: check whether it falls in a non-taken branch.
+    block_id = task_step.active_block_id
+    if block_id is not None and task_step.branch is not None:
+        decision = branch_decisions.get(block_id)
+        if decision is None:
+            # No decision recorded — should never happen since IF runs
+            # before any of its inner steps. Defensive: log + execute.
+            log.warning(
+                "step %d in block %d has no recorded branch decision; "
+                "executing anyway.",
+                idx,
+                block_id,
+            )
+            return None
+        taken_branch = "then" if decision else "else"
+        if task_step.branch != taken_branch:
+            log.info(
+                "Skipping step %d: branch %s not taken (IF block %d).",
+                idx,
+                task_step.branch,
+                block_id,
+            )
+            return VerificationResult(
+                passed=True,
+                reason=(
+                    f"skipped: branch '{task_step.branch}' not taken "
+                    f"(IF block {block_id})"
+                ),
+            )
+    return None
+
+
+def _evaluate_condition_via_screenshot(
+    *,
+    text: str,
+    vlm: GeminiClient,
+    geometry: ScreenGeometry,
+    label: str,
+) -> bool:
+    """Take one screenshot and ask the VLM if ``text`` is on screen.
+
+    Pure helper so IF and WAIT_UNTIL can share the same code path.
+    Returns False on any VLM error and logs a warning — better to take
+    the False branch than to crash the run.
+    """
+    try:
+        image = capture_screenshot()
+        return vlm.check_condition(text, image)
+    except Exception as exc:  # pragma: no cover — defensive guard
+        log.warning(
+            "%s: condition check failed (%s); treating as False.",
+            label,
+            exc,
+        )
+        return False
 
 
 def _log_routing_summary(
@@ -1026,7 +1211,11 @@ def run(
     pause_handler: Callable[[str], bool] | None = None,
 ) -> int:
     try:
-        steps = load_steps(config.tasks_file, csv_override=csv_override)
+        steps = load_steps(
+            config.tasks_file,
+            csv_override=csv_override,
+            skills_dir=config.skills_dir,
+        )
     except (TasksLoadError, FileNotFoundError) as exc:
         log.error("Failed to load tasks file %s: %s", config.tasks_file, exc)
         print(f"[tasks error] {exc}", file=sys.stderr)
@@ -1184,6 +1373,26 @@ def run(
             and 0 <= existing_state.last_completed_step < len(steps)
         ):
             start_idx = existing_state.last_completed_step + 1
+            # If we're about to resume INSIDE an IF/ELSE/END_IF block,
+            # rewind to that block's if_begin so the condition is
+            # re-evaluated and the branch_decisions table is repopulated.
+            # Without this the agent would have no record of which branch
+            # to take and would run BOTH branches as if no IF existed.
+            if start_idx <= len(steps):
+                resumed_step = steps[start_idx - 1]
+                active = resumed_step.active_block_id
+                if active is not None:
+                    rewind_idx = _find_if_begin_index(steps, active)
+                    if rewind_idx is not None and rewind_idx < start_idx:
+                        log.info(
+                            "Resume point (step %d) is inside IF block "
+                            "%d; rewinding to step %d (the IF) so the "
+                            "condition can be re-evaluated.",
+                            start_idx,
+                            active,
+                            rewind_idx,
+                        )
+                        start_idx = rewind_idx
             log.info(
                 "Resuming from checkpoint: step %d/%d (file=%s)",
                 start_idx,
@@ -1262,6 +1471,12 @@ def run(
         start_idx,
     )
 
+    # Track which side of each IF block was taken. Built up as if_begin
+    # steps run; consulted by every step inside the block to decide
+    # whether to execute or skip. Skipped steps still tick the step
+    # counter so total_steps math (checkpoints, "x/N") stays consistent.
+    branch_decisions: dict[int, bool] = {}
+
     success = False
     try:
         for idx in range(start_idx, len(steps) + 1):
@@ -1305,6 +1520,52 @@ def run(
                     row_index=task_step.row_index,
                     csv_name=task_step.csv_name,
                 )
+
+            # Control-flow directives (IF / ELSE / END_IF) and step-skip
+            # decisions are handled BEFORE the planner runs — they are
+            # synthetic "non-action" steps that consume a step counter
+            # slot but never invoke run_step.
+            control_result = _maybe_handle_control(
+                task_step=task_step,
+                idx=idx,
+                total_steps=len(steps),
+                vlm=vlm,
+                geometry=geometry,
+                branch_decisions=branch_decisions,
+                wait_until_timeout_seconds=config.wait_until_timeout_seconds,
+                wait_until_poll_seconds=config.wait_until_poll_seconds,
+            )
+            if control_result is not None:
+                # Skipped or pure control directive: synthesize a
+                # passing verdict, persist progress, and move on.
+                state = state.advance()
+                if variables is not None:
+                    state = state.with_variables(variables.to_dict())
+                try:
+                    save_state(config.state_file, state)
+                except OSError as exc:
+                    log.warning(
+                        "Failed to save checkpoint to %s: %s",
+                        config.state_file,
+                        exc,
+                    )
+                artifact_writer.append_summary(
+                    step_idx=idx,
+                    step_text=step_text,
+                    passed=control_result.passed,
+                    reason=control_result.reason,
+                )
+                if not control_result.passed:
+                    msg = (
+                        f"\n[!] HALT at step {idx}/{len(steps)}: "
+                        f"{step_text}\n"
+                        f"    Reason: {control_result.reason}\n"
+                        "    The agent has stopped to prevent runaway actions."
+                    )
+                    print(msg, file=sys.stderr)
+                    log.error("Halting execution: %s", control_result.reason)
+                    return 1
+                continue
 
             # Routing hint is per-step and frozen at run start; pass the
             # rendered string so the planner sees it embedded in its

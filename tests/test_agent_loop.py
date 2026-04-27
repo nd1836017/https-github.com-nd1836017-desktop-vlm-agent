@@ -64,6 +64,14 @@ class FakeClient:
         passed, reason = out
         return VerificationResult(passed=passed, reason=reason)
 
+    def check_condition(self, condition_text, screenshot):
+        """Used by IF / WAIT_UNTIL. Pulls from a queue if provided, else
+        delegates to the verify queue (so simple tests can feed both
+        conditions and verifications through one stream)."""
+        if hasattr(self, "_condition_outputs"):
+            return self._condition_outputs.pop(0)
+        return self.verify(condition_text, screenshot).passed
+
 
 @pytest.fixture
 def fake_geometry():
@@ -128,6 +136,9 @@ def _cfg(tmp_path, tasks_text: str, **overrides) -> Config:
         browser_cdp_port=29229,
         task_routing_mode="off",
         task_decomposition_mode="off",
+        skills_dir=None,
+        wait_until_timeout_seconds=30.0,
+        wait_until_poll_seconds=2.0,
     )
     defaults.update(overrides)
     return Config(**defaults)
@@ -483,6 +494,189 @@ def test_resume_after_decomposition_expansion_succeeds(
     assert len(client2.plan_calls) == 2
     assert client2.plan_calls[0]["step"] == "compound B part 1"  # step 3
     assert client2.plan_calls[1]["step"] == "compound B part 2"  # step 4
+
+
+# -----------------------------------------------------------------------------
+# Conditional logic + skill library — end-to-end through run()
+# -----------------------------------------------------------------------------
+def test_run_executes_then_branch_when_if_condition_true(
+    fake_geometry, patch_pyautogui, tmp_path
+):
+    """IF [x] THEN: when condition is True, only THEN branch reaches planner."""
+    cfg = _cfg(
+        tmp_path,
+        "before\n"
+        "IF [signed in] THEN\n"
+        "    do A\n"
+        "ELSE\n"
+        "    do B\n"
+        "END_IF\n"
+        "after\n",
+    )
+    client = FakeClient(
+        # Only `before`, `do A`, `after` should plan; `do B` is skipped.
+        plan_outputs=["CLICK [1,1]", "CLICK [2,2]", "CLICK [3,3]"],
+        verify_outputs=[
+            VerificationResult(passed=True, reason="PASS"),
+            VerificationResult(passed=True, reason="PASS"),
+            VerificationResult(passed=True, reason="PASS"),
+        ],
+    )
+    client._condition_outputs = [True]  # IF evaluation
+    with (
+        mock.patch("agent.agent.GeminiClient", return_value=client),
+        mock.patch("agent.agent.detect_geometry", return_value=fake_geometry),
+    ):
+        exit_code = run(cfg)
+
+    assert exit_code == 0
+    # Three planner calls — `before`, `do A`, `after`.
+    assert [c["step"] for c in client.plan_calls] == ["before", "do A", "after"]
+
+
+def test_run_executes_else_branch_when_if_condition_false(
+    fake_geometry, patch_pyautogui, tmp_path
+):
+    """IF [x] THEN: when condition is False, only ELSE branch reaches planner."""
+    cfg = _cfg(
+        tmp_path,
+        "IF [signed in] THEN\n"
+        "    do A\n"
+        "ELSE\n"
+        "    do B\n"
+        "END_IF\n",
+    )
+    client = FakeClient(
+        plan_outputs=["CLICK [9,9]"],
+        verify_outputs=[VerificationResult(passed=True, reason="PASS")],
+    )
+    client._condition_outputs = [False]  # IF evaluation -> ELSE branch
+    with (
+        mock.patch("agent.agent.GeminiClient", return_value=client),
+        mock.patch("agent.agent.detect_geometry", return_value=fake_geometry),
+    ):
+        exit_code = run(cfg)
+
+    assert exit_code == 0
+    assert [c["step"] for c in client.plan_calls] == ["do B"]
+
+
+def test_run_wait_until_timeout_halts(
+    fake_geometry, patch_pyautogui, tmp_path, monkeypatch
+):
+    """WAIT_UNTIL with a never-true condition halts the run with exit 1."""
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    # Pin time.monotonic so the timeout deadline is crossed after the
+    # first failed check.
+    fake_clock = iter([0.0, 0.0, 5.0, 5.0, 5.0])
+
+    def _mono():
+        try:
+            return next(fake_clock)
+        except StopIteration:
+            return 99.0
+
+    monkeypatch.setattr("time.monotonic", _mono)
+
+    cfg = _cfg(
+        tmp_path,
+        "WAIT_UNTIL [Welcome back]\n",
+        wait_until_timeout_seconds=1.0,
+        wait_until_poll_seconds=0.0,
+    )
+    client = FakeClient(plan_outputs=[], verify_outputs=[])
+    client._condition_outputs = [False]  # never satisfies
+    with (
+        mock.patch("agent.agent.GeminiClient", return_value=client),
+        mock.patch("agent.agent.detect_geometry", return_value=fake_geometry),
+    ):
+        exit_code = run(cfg)
+    assert exit_code == 1
+    # The planner was never called — WAIT_UNTIL is purely a polling step.
+    assert client.plan_calls == []
+
+
+def test_run_skill_library_inlines_at_load_time(
+    fake_geometry, patch_pyautogui, tmp_path
+):
+    """USE skill_name expands inline before the run starts."""
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (skills / "greet.txt").write_text("say hi\n")
+
+    cfg = _cfg(
+        tmp_path,
+        "USE greet\nfinish\n",
+        skills_dir=skills,
+    )
+    client = FakeClient(
+        plan_outputs=["CLICK [1,1]", "CLICK [2,2]"],
+        verify_outputs=[
+            VerificationResult(passed=True, reason="PASS"),
+            VerificationResult(passed=True, reason="PASS"),
+        ],
+    )
+    with (
+        mock.patch("agent.agent.GeminiClient", return_value=client),
+        mock.patch("agent.agent.detect_geometry", return_value=fake_geometry),
+    ):
+        exit_code = run(cfg)
+    assert exit_code == 0
+    assert [c["step"] for c in client.plan_calls] == ["say hi", "finish"]
+
+
+def test_resume_inside_if_block_rewinds_to_if_begin(
+    fake_geometry, patch_pyautogui, tmp_path
+):
+    """Resume in mid-block: rewind to if_begin so the IF re-evaluates."""
+    cfg = _cfg(
+        tmp_path,
+        "before\n"
+        "IF [signed in] THEN\n"
+        "    do A\n"
+        "    do A2\n"
+        "END_IF\n"
+        "after\n",
+        max_replans_per_step=0,
+    )
+    # First run: pass `before`, evaluate IF True, pass `do A`, fail `do A2`.
+    # Last completed step is 4 (1=before, 2=if_begin, 3=do A, 4=fail do A2).
+    client1 = FakeClient(
+        plan_outputs=["CLICK [1,1]", "CLICK [2,2]", "CLICK [3,3]"],
+        verify_outputs=[
+            VerificationResult(passed=True, reason="PASS"),  # before
+            VerificationResult(passed=True, reason="PASS"),  # do A
+            VerificationResult(passed=False, reason="FAIL"),  # do A2
+        ],
+    )
+    client1._condition_outputs = [True]  # IF True
+    with (
+        mock.patch("agent.agent.GeminiClient", return_value=client1),
+        mock.patch("agent.agent.detect_geometry", return_value=fake_geometry),
+    ):
+        assert run(cfg) == 1
+
+    # Resume: should rewind to step 2 (if_begin), re-evaluate condition,
+    # then run only step 4 (do A2) since step 3 (do A) was already done.
+    # Wait — actually rewind sets start_idx to 2 so steps 2,3,4,5,6 run.
+    # Step 2: IF re-eval; Step 3: `do A` reaches planner again (re-runs);
+    # Step 4: `do A2` planner; step 5: END_IF; step 6: after.
+    client2 = FakeClient(
+        plan_outputs=["CLICK [3,3]", "CLICK [4,4]", "CLICK [5,5]"],
+        verify_outputs=[
+            VerificationResult(passed=True, reason="PASS"),  # do A
+            VerificationResult(passed=True, reason="PASS"),  # do A2
+            VerificationResult(passed=True, reason="PASS"),  # after
+        ],
+    )
+    client2._condition_outputs = [True]  # IF re-evaluated
+    with (
+        mock.patch("agent.agent.GeminiClient", return_value=client2),
+        mock.patch("agent.agent.detect_geometry", return_value=fake_geometry),
+    ):
+        assert run(cfg, resume=True) == 0
+    # `do A` re-ran (rewind cost), then `do A2`, then `after`.
+    assert [c["step"] for c in client2.plan_calls] == ["do A", "do A2", "after"]
 
 
 # -----------------------------------------------------------------------------

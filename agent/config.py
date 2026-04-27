@@ -74,6 +74,17 @@ class Config:
     # one at a time. Two values: ``auto`` (default; runs Gemini;
     # graceful fallback on error), ``off`` (no decomposition).
     task_decomposition_mode: str
+    # Skill library: SKILLS_DIR points at a folder of .txt skill files
+    # so a tasks file can ``USE login_to_gmail`` and inline that skill's
+    # contents at load time. ``None`` disables the directive (USE in a
+    # tasks file becomes a load-time error).
+    skills_dir: Path | None
+    # Conditional logic: WAIT_UNTIL polling cadence + total budget. The
+    # IF/ELSE/END_IF directives reuse WAIT_UNTIL_TIMEOUT_SECONDS only
+    # for their single screenshot capture (no polling) — distinct knobs
+    # left in case we want to evolve them independently later.
+    wait_until_timeout_seconds: float
+    wait_until_poll_seconds: float
 
     @classmethod
     def load(cls) -> Config:
@@ -141,6 +152,13 @@ class Config:
             task_decomposition_mode=os.getenv(
                 "TASK_DECOMPOSITION", "auto"
             ).strip().lower(),
+            skills_dir=_env_skills_dir(),
+            wait_until_timeout_seconds=float(
+                os.getenv("WAIT_UNTIL_TIMEOUT_SECONDS", "30.0")
+            ),
+            wait_until_poll_seconds=float(
+                os.getenv("WAIT_UNTIL_POLL_SECONDS", "2.0")
+            ),
         )
         if cfg.rpd_warn_threshold >= cfg.rpd_halt_threshold:
             raise ValueError(
@@ -190,6 +208,22 @@ def _env_workdir() -> Path | None:
     if not raw:
         return None
     return Path(raw).expanduser()
+
+
+def _env_skills_dir() -> Path | None:
+    """Resolve ``SKILLS_DIR``. Defaults to ``./skills`` if that folder exists.
+
+    Returning ``None`` (when SKILLS_DIR is unset and ``./skills`` doesn't
+    exist) makes ``USE skill_name`` raise a clear "skills directory not
+    configured" error rather than silently doing nothing.
+    """
+    raw = os.getenv("SKILLS_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    default = Path("skills")
+    if default.exists() and default.is_dir():
+        return default
+    return None
 
 
 def configure_logging(level: str) -> None:

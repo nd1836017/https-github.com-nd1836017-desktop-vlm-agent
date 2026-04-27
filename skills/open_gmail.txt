@@ -1,0 +1,6 @@
+# open_gmail — open Gmail in the foreground browser and wait for the
+# inbox to load. The WAIT_UNTIL guards against acting before the inbox
+# has finished rendering on slow connections.
+
+BROWSER_GO [https://mail.google.com]
+WAIT_UNTIL [Inbox]

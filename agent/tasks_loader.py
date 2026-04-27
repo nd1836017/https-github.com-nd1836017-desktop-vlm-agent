@@ -42,6 +42,7 @@ from dataclasses import dataclass, replace
 from io import StringIO
 from pathlib import Path
 
+from .skills import expand_use_directives
 from .task_router import RoutingHint, parse_inline_annotation
 
 log = logging.getLogger(__name__)
@@ -63,12 +64,36 @@ class TaskStep:
     and surface here as ``RoutingHint(source='manual', ...)`` — we do
     that here (not in ``apply_router``) so the user-visible step text is
     cleaned of the bracket prefix before any other code sees it.
+
+    ``control_kind`` flags this step as a control-flow directive:
+    ``if_begin`` / ``if_else`` / ``if_end`` / ``wait_until``. None for
+    plain action steps. Control directives never call the planner; the
+    agent loop interprets them directly.
+
+    ``block_id`` groups the if_begin / if_else / if_end of the same
+    IF/ELSE/END_IF triple. ``active_block_id`` is set on every step
+    that lives INSIDE such a block (including the directives
+    themselves), and ``branch`` is ``"then"`` or ``"else"`` depending
+    on which side of the block the step is in. These let the agent
+    loop skip the non-taken branch with one comparison per step.
+
+    ``condition_text`` carries the bracketed text of an IF or
+    WAIT_UNTIL directive. ``wait_timeout_seconds`` / ``wait_poll_seconds``
+    are set only on WAIT_UNTIL steps; both default to None and are
+    filled in from config at run time.
     """
 
     text: str
     row_index: int | None = None
     csv_name: str | None = None
     routing_hint: RoutingHint | None = None
+    control_kind: str | None = None
+    block_id: int | None = None
+    active_block_id: int | None = None
+    branch: str | None = None
+    condition_text: str | None = None
+    wait_timeout_seconds: float | None = None
+    wait_poll_seconds: float | None = None
 
 
 _FOR_EACH_RE = re.compile(
@@ -76,6 +101,19 @@ _FOR_EACH_RE = re.compile(
     re.IGNORECASE,
 )
 _END_FOR_EACH_RE = re.compile(r"^\s*END_FOR_EACH_ROW\s*$", re.IGNORECASE)
+_IF_RE = re.compile(
+    # ``(.*?)`` (zero or more) so an empty ``IF [] THEN`` still matches
+    # the directive and produces our "non-empty condition required"
+    # error instead of falling through to the action-step path.
+    r"^\s*IF\s*\[\s*(.*?)\s*\]\s*THEN\s*$",
+    re.IGNORECASE,
+)
+_ELSE_RE = re.compile(r"^\s*ELSE\s*$", re.IGNORECASE)
+_END_IF_RE = re.compile(r"^\s*END_IF\s*$", re.IGNORECASE)
+_WAIT_UNTIL_RE = re.compile(
+    r"^\s*WAIT_UNTIL\s*\[\s*(.*?)\s*\]\s*$",
+    re.IGNORECASE,
+)
 _PLACEHOLDER_RE = re.compile(
     r"\{\{\s*row\.([A-Za-z0-9_][A-Za-z0-9_\- ]*?)\s*(?:\|([^}]*))?\s*\}\}"
 )
@@ -88,36 +126,30 @@ class TasksLoadError(ValueError):
 def load_tasks(
     path: Path,
     csv_override: Path | None = None,
+    skills_dir: Path | None = None,
 ) -> list[str]:
     """Parse and expand a tasks file into a flat list of step strings.
 
     The returned list has all ``FOR_EACH_ROW`` blocks fully expanded with
-    ``{{row.<field>}}`` placeholders substituted. The returned strings
-    are exactly what the planner will see — so a sample row's expansion
-    can be inspected directly.
+    ``{{row.<field>}}`` placeholders substituted, and every ``USE
+    skill_name`` line replaced with the contents of that skill file.
+    Returned strings are exactly what the planner will see, so a
+    sample row's expansion can be inspected directly. Control-flow
+    directives (IF/ELSE/END_IF/WAIT_UNTIL) appear as their own entries
+    so an inspection still shows the structure.
 
     Raises ``FileNotFoundError`` if ``path`` does not exist, and
     ``TasksLoadError`` for any structural or templating issue.
     """
-    if not path.exists():
-        raise FileNotFoundError(f"Tasks file not found: {path}")
-
-    # CLI / API overrides are resolved against the user's current working
-    # directory (intuitive for one-off `--csv mydata.csv` invocations).
-    # In-file CSV paths are resolved against the tasks file's directory,
-    # which happens later inside _expand().
-    if csv_override is not None and not csv_override.is_absolute():
-        csv_override = csv_override.resolve()
-
-    raw_text = path.read_text(encoding="utf-8-sig")
-    lines = raw_text.splitlines()
-    steps = _expand(lines, base_dir=path.parent, csv_override=csv_override)
-    return [s.text for s in steps]
+    return [
+        s.text for s in load_steps(path, csv_override=csv_override, skills_dir=skills_dir)
+    ]
 
 
 def load_steps(
     path: Path,
     csv_override: Path | None = None,
+    skills_dir: Path | None = None,
 ) -> list[TaskStep]:
     """Like ``load_tasks`` but returns ``TaskStep`` objects with row metadata.
 
@@ -125,6 +157,9 @@ def load_steps(
     suffix filenames with ``(rowN)`` when a step is part of a FOR_EACH_ROW
     block. ``load_tasks`` is preserved as a thin wrapper for callers that
     only need the flat string list (notably the test suite).
+
+    ``skills_dir`` enables the ``USE skill_name`` directive — when None,
+    a tasks file containing ``USE`` lines raises ``TasksLoadError``.
     """
     if not path.exists():
         raise FileNotFoundError(f"Tasks file not found: {path}")
@@ -134,6 +169,14 @@ def load_steps(
 
     raw_text = path.read_text(encoding="utf-8-sig")
     lines = raw_text.splitlines()
+    # Expand USE skill_name directives BEFORE FOR_EACH_ROW / IF / WAIT_UNTIL
+    # parsing so a skill file can use any of those directives itself.
+    try:
+        lines = expand_use_directives(lines, skills_dir=skills_dir)
+    except Exception as exc:
+        # Wrap SkillError in TasksLoadError so callers handle one
+        # exception type at the load boundary.
+        raise TasksLoadError(str(exc)) from exc
     return _expand(lines, base_dir=path.parent, csv_override=csv_override)
 
 
@@ -173,10 +216,18 @@ def _expand(
     csv_override: Path | None,
 ) -> list[TaskStep]:
     out: list[TaskStep] = []
-    in_block = False
+    # FOR_EACH_ROW state.
+    in_for_block = False
     block_csv_path: Path | None = None
     block_lineno: int = 0
     block_body: list[tuple[int, str]] = []
+    # IF/ELSE/END_IF state. We only allow a single (un-nested) IF block
+    # at the top level for v1 — nested IF is rejected at parse time so
+    # the agent loop's branch tracking can stay a single field.
+    if_state: str | None = None  # None | "then" | "else"
+    if_block_id: int = 0
+    next_block_id: int = 0
+    if_lineno: int = 0
 
     for lineno, raw in enumerate(lines, start=1):
         stripped = raw.strip()
@@ -185,27 +236,37 @@ def _expand(
 
         end_match = _END_FOR_EACH_RE.match(stripped)
         if end_match is not None:
-            if not in_block:
+            if not in_for_block:
                 raise TasksLoadError(
                     f"Line {lineno}: END_FOR_EACH_ROW without a matching "
                     f"FOR_EACH_ROW."
                 )
             assert block_csv_path is not None  # for type checker
-            out.extend(
-                _expand_block(
-                    block_body,
-                    csv_path=block_csv_path,
-                    block_lineno=block_lineno,
-                )
+            block_steps = _expand_block(
+                block_body,
+                csv_path=block_csv_path,
+                block_lineno=block_lineno,
             )
-            in_block = False
+            # If this FOR_EACH_ROW lives inside an active IF branch,
+            # tag every emitted step with that branch's metadata.
+            if if_state is not None:
+                block_steps = [
+                    replace(
+                        s,
+                        active_block_id=if_block_id,
+                        branch=if_state,
+                    )
+                    for s in block_steps
+                ]
+            out.extend(block_steps)
+            in_for_block = False
             block_csv_path = None
             block_body = []
             continue
 
         for_match = _FOR_EACH_RE.match(stripped)
         if for_match is not None:
-            if in_block:
+            if in_for_block:
                 raise TasksLoadError(
                     f"Line {lineno}: nested FOR_EACH_ROW is not supported "
                     f"(outer block opened on line {block_lineno})."
@@ -219,27 +280,137 @@ def _expand(
             chosen = csv_override if csv_override is not None else Path(csv_arg)
             block_csv_path = chosen if chosen.is_absolute() else (base_dir / chosen)
             block_lineno = lineno
-            in_block = True
+            in_for_block = True
             block_body = []
             continue
 
-        if in_block:
-            block_body.append((lineno, stripped))
-        else:
-            # Outside a block: reject placeholders so users don't silently
-            # ship unsubstituted text to the VLM.
-            if _PLACEHOLDER_RE.search(stripped):
+        if in_for_block:
+            # Inside a FOR_EACH_ROW: collect raw lines for later
+            # per-row expansion. Reject IF / WAIT_UNTIL inside a
+            # loop block — control flow is allowed at the top level
+            # only for v1, otherwise the parser/agent semantics
+            # multiply out (e.g. an IF that should be evaluated once
+            # per row vs once before the loop).
+            if (
+                _IF_RE.match(stripped)
+                or _ELSE_RE.match(stripped)
+                or _END_IF_RE.match(stripped)
+                or _WAIT_UNTIL_RE.match(stripped)
+            ):
                 raise TasksLoadError(
-                    f"Line {lineno}: '{{{{row.<field>}}}}' placeholder used "
-                    f"outside a FOR_EACH_ROW block (no CSV row to substitute)."
+                    f"Line {lineno}: IF / ELSE / END_IF / WAIT_UNTIL "
+                    f"are not supported inside a FOR_EACH_ROW block "
+                    f"(opened on line {block_lineno})."
                 )
-            hint, cleaned = parse_inline_annotation(stripped)
-            out.append(TaskStep(text=cleaned, routing_hint=hint))
+            block_body.append((lineno, stripped))
+            continue
 
-    if in_block:
+        # Top-level (outside FOR_EACH_ROW) — handle IF/ELSE/END_IF/WAIT_UNTIL.
+        if_match = _IF_RE.match(stripped)
+        if if_match is not None:
+            if if_state is not None:
+                raise TasksLoadError(
+                    f"Line {lineno}: nested IF is not supported "
+                    f"(outer IF opened on line {if_lineno})."
+                )
+            condition_text = if_match.group(1).strip()
+            if not condition_text:
+                raise TasksLoadError(
+                    f"Line {lineno}: IF requires non-empty condition text "
+                    f"(e.g. IF [Sign in to your account] THEN)."
+                )
+            if_block_id = next_block_id
+            next_block_id += 1
+            if_state = "then"
+            if_lineno = lineno
+            out.append(
+                TaskStep(
+                    text=stripped,
+                    control_kind="if_begin",
+                    block_id=if_block_id,
+                    active_block_id=if_block_id,
+                    branch="then",
+                    condition_text=condition_text,
+                )
+            )
+            continue
+        if _ELSE_RE.match(stripped) is not None:
+            if if_state != "then":
+                raise TasksLoadError(
+                    f"Line {lineno}: ELSE without a matching IF (or used "
+                    f"twice in the same block)."
+                )
+            if_state = "else"
+            out.append(
+                TaskStep(
+                    text=stripped,
+                    control_kind="if_else",
+                    block_id=if_block_id,
+                    active_block_id=if_block_id,
+                    branch="else",
+                )
+            )
+            continue
+        if _END_IF_RE.match(stripped) is not None:
+            if if_state is None:
+                raise TasksLoadError(
+                    f"Line {lineno}: END_IF without a matching IF."
+                )
+            out.append(
+                TaskStep(
+                    text=stripped,
+                    control_kind="if_end",
+                    block_id=if_block_id,
+                    active_block_id=if_block_id,
+                    branch=if_state,
+                )
+            )
+            if_state = None
+            continue
+
+        wait_match = _WAIT_UNTIL_RE.match(stripped)
+        if wait_match is not None:
+            condition_text = wait_match.group(1).strip()
+            if not condition_text:
+                raise TasksLoadError(
+                    f"Line {lineno}: WAIT_UNTIL requires non-empty condition "
+                    f"text (e.g. WAIT_UNTIL [Welcome back])."
+                )
+            out.append(
+                TaskStep(
+                    text=stripped,
+                    control_kind="wait_until",
+                    condition_text=condition_text,
+                    active_block_id=if_block_id if if_state is not None else None,
+                    branch=if_state,
+                )
+            )
+            continue
+
+        # Plain action step.
+        if _PLACEHOLDER_RE.search(stripped):
+            raise TasksLoadError(
+                f"Line {lineno}: '{{{{row.<field>}}}}' placeholder used "
+                f"outside a FOR_EACH_ROW block (no CSV row to substitute)."
+            )
+        hint, cleaned = parse_inline_annotation(stripped)
+        out.append(
+            TaskStep(
+                text=cleaned,
+                routing_hint=hint,
+                active_block_id=if_block_id if if_state is not None else None,
+                branch=if_state,
+            )
+        )
+
+    if in_for_block:
         raise TasksLoadError(
             f"FOR_EACH_ROW opened on line {block_lineno} was never closed "
             f"with END_FOR_EACH_ROW."
+        )
+    if if_state is not None:
+        raise TasksLoadError(
+            f"IF opened on line {if_lineno} was never closed with END_IF."
         )
 
     return out

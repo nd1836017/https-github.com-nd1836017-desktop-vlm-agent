@@ -1,0 +1,7 @@
+# dismiss_cookie_banner — click the most common "Accept all" / "OK"
+# cookie banner buttons if they're on screen. Wrapped in IF so it does
+# nothing when there's no banner.
+
+IF [Accept all cookies] THEN
+    click the "Accept all" button
+END_IF

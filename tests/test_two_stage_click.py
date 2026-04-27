@@ -137,7 +137,13 @@ class TwoStageFakeClient:
         self.verify_calls = 0
 
     def plan_action(
-        self, step, screenshot, history_summary="", previous_failure="", extra_images=None
+        self,
+        step,
+        screenshot,
+        history_summary="",
+        previous_failure="",
+        extra_images=None,
+        routing_hint="",
     ):
         self.plan_calls.append({"step": step})
         out = self._plan_outputs.pop(0)

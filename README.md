@@ -362,6 +362,41 @@ Every screenshot we send to Gemini goes through a tiny optimization pipeline fir
 
 If you ever need to send the original full-resolution PNGs again (debugging an accuracy regression, comparing model behavior), set `VLM_IMAGE_MAX_DIM=0` and `VLM_IMAGE_QUALITY=100` — the encoded JPEG is then effectively lossless.
 
+### Smart task router (TASK_ROUTING)
+
+The router runs **once at run start** — a single Gemini call decomposes your raw `tasks.txt` and tags each step's complexity. The planner then sees that tag (and an optional suggested literal command) as advisory context. Goal: stop randomizing features and steer the agent to the cheapest primitive that fits.
+
+Three complexity tags:
+
+| Tag | Cost | Used for | Example |
+|---|---|---|---|
+| `browser-fast` | ~0 vision tokens | URLs / known selectors | `BROWSER_GO [https://youtube.com]` |
+| `browser-vlm` | full vision | browser, vision-required | "click the third video" |
+| `desktop-vlm` | full vision | native apps, OS dialogs | "open Notepad" |
+
+Three modes (`TASK_ROUTING` env var):
+
+- `auto` (default) — runs the router. Browser fast-path is auto-enabled when Chrome's CDP is reachable; otherwise `browser-fast` decisions are downgraded to `browser-vlm` so the planner doesn't try to emit doomed commands.
+- `manual` — skips the Gemini call. You annotate lines yourself with `[browser-fast]`, `[browser-vlm]`, `[desktop-vlm]` (or aliases `[browser]`, `[vlm]`, `[desktop]`).
+- `off` — no router at all. Safety rollback if anything goes wrong.
+
+Manual annotations beat the auto router — the user's explicit `[tag]` is always more authoritative than the model's classification.
+
+Example tasks file with mixed annotation:
+
+```
+# Auto-classified (router decides)
+open youtube
+search for justin bieber
+click the first video
+
+# Manual override
+[vlm] take a screenshot of the comments section
+[browser-fast] BROWSER_GO [https://gmail.com]
+```
+
+The router fails open: any error (network, schema, timeout) drops back to no-routing behavior and logs a warning. A flaky router never blocks a run from starting.
+
 ---
 
 ## Architecture

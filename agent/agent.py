@@ -58,7 +58,20 @@ from .screen import (
     image_signature,
 )
 from .state import AgentState, load_state, save_state
-from .tasks_loader import TasksLoadError, TaskStep, load_steps, load_tasks
+from .task_router import (
+    RoutingMode,
+    apply_router,
+)
+from .task_router import (
+    parse_mode as parse_routing_mode,
+)
+from .tasks_loader import (
+    TasksLoadError,
+    TaskStep,
+    attach_routing_hints,
+    load_steps,
+    load_tasks,
+)
 from .variables import (
     UnknownVariableError,
     VariableStore,
@@ -127,6 +140,60 @@ def _handle_pause(reason: str) -> bool:
     except (EOFError, KeyboardInterrupt):
         return False
     return answer != "q"
+
+
+def _log_routing_summary(
+    steps: list[TaskStep],
+    *,
+    mode: RoutingMode,
+) -> None:
+    """Print a one-shot breakdown of router decisions to the run log.
+
+    Quiet by default — emits a single INFO line with counts plus a
+    DEBUG line per annotated step. Goal: make it obvious in the log
+    whether the router did what you expected, without spamming.
+    """
+    counts: dict[str, int] = {
+        "browser-fast": 0,
+        "browser-vlm": 0,
+        "desktop-vlm": 0,
+        "unrouted": 0,
+    }
+    manual_count = 0
+    for step in steps:
+        hint = step.routing_hint
+        if hint is None:
+            counts["unrouted"] += 1
+            continue
+        counts[hint.complexity.value] = counts.get(hint.complexity.value, 0) + 1
+        if hint.source == "manual":
+            manual_count += 1
+
+    log.info(
+        "Task router (%s): %d browser-fast, %d browser-vlm, %d desktop-vlm, "
+        "%d unrouted (%d from manual annotations)",
+        mode.value,
+        counts["browser-fast"],
+        counts["browser-vlm"],
+        counts["desktop-vlm"],
+        counts["unrouted"],
+        manual_count,
+    )
+    for idx, step in enumerate(steps, start=1):
+        if step.routing_hint is None:
+            continue
+        log.debug(
+            "  step %d [%s/%s]%s: %s",
+            idx,
+            step.routing_hint.complexity.value,
+            step.routing_hint.source,
+            (
+                f" -> {step.routing_hint.suggested_command}"
+                if step.routing_hint.suggested_command
+                else ""
+            ),
+            step.text[:80],
+        )
 
 
 def read_tasks(path: Path, csv_override: Path | None = None) -> list[str]:
@@ -365,6 +432,7 @@ def _attempt_step(
     extra_images: list[bytes] | None = None,
     variables: VariableStore | None = None,
     browser_bridge: BrowserBridge | None = None,
+    routing_hint: str = "",
 ) -> tuple[VerificationResult | PauseRequested, str]:
     """Run one plan/execute/verify attempt and return (verdict, action_text).
 
@@ -392,6 +460,7 @@ def _attempt_step(
             history_summary=history_summary,
             previous_failure=previous_failure,
             extra_images=extra_images,
+            routing_hint=routing_hint,
         )
         if cmd is None:
             # JSON-mode failed or disabled — fall back to regex parse.
@@ -687,6 +756,7 @@ def run_step(
     step_timeout_seconds: float = 0.0,
     stuck_step_threshold: int = 0,
     browser_bridge: BrowserBridge | None = None,
+    routing_hint: str = "",
 ) -> VerificationResult:
     """Run one step with up to `max_replans` replans on verify FAIL.
 
@@ -823,6 +893,7 @@ def run_step(
             extra_images=extra_images,
             variables=variables,
             browser_bridge=browser_bridge,
+            routing_hint=routing_hint,
         )
 
         # PAUSE: ask the human, then loop back without consuming the
@@ -1104,6 +1175,26 @@ def run(
         base_dir=config.run_artifacts_dir,
     )
 
+    # Smart task router: one Gemini call to classify every step's
+    # complexity and (where possible) suggest a literal command. The
+    # planner then sees the hint as advisory context. Manual ``[tag]``
+    # annotations on tasks-file lines are already attached to the
+    # TaskSteps at load time and are NEVER overwritten by the auto
+    # router — the user's explicit annotation always wins.
+    routing_mode = parse_routing_mode(config.task_routing_mode)
+    if routing_mode != RoutingMode.OFF:
+        bridge_ready = (
+            browser_bridge is not None and browser_bridge.is_connected()
+        )
+        auto_hints = apply_router(
+            [s.text for s in steps],
+            mode=routing_mode,
+            client=vlm,
+            enable_browser_fast_path=bridge_ready,
+        )
+        steps = attach_routing_hints(steps, auto_hints)
+        _log_routing_summary(steps, mode=routing_mode)
+
     log.info(
         "Loaded %d step(s) from %s (starting at step %d)",
         len(steps),
@@ -1155,6 +1246,15 @@ def run(
                     csv_name=task_step.csv_name,
                 )
 
+            # Routing hint is per-step and frozen at run start; pass the
+            # rendered string so the planner sees it embedded in its
+            # user prompt. Empty string when no hint is attached.
+            hint_text = (
+                task_step.routing_hint.render_for_prompt()
+                if task_step.routing_hint is not None
+                else ""
+            )
+
             result = run_step(
                 step=step_text,
                 vlm=vlm,
@@ -1179,6 +1279,7 @@ def run(
                 step_timeout_seconds=config.step_timeout_seconds,
                 stuck_step_threshold=config.stuck_step_threshold,
                 browser_bridge=browser_bridge,
+                routing_hint=hint_text,
             )
 
             # action_text is resolved inside the writer from the most recent

@@ -20,7 +20,7 @@ class FakeClient:
         self._verdicts = list(verdicts)
         self.plan_calls = 0
 
-    def plan_action(self, step, screenshot, history_summary="", previous_failure="", extra_images=None):
+    def plan_action(self, step, screenshot, history_summary="", previous_failure="", extra_images=None, routing_hint=""):
         self.plan_calls += 1
         return "CLICK [500,500]", None
 

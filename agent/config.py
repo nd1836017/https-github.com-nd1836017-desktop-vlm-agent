@@ -60,6 +60,14 @@ class Config:
     browser_fast_path: bool
     browser_cdp_host: str
     browser_cdp_port: int
+    # Smart task router (TASK_ROUTING). One Gemini call at run start
+    # decomposes natural-language instructions into atomic actions and
+    # tags each as 'browser-fast' / 'browser-vlm' / 'desktop-vlm'. The
+    # planner sees the tag + suggested command as advisory context. Three
+    # values: ``auto`` (default; runs Gemini; graceful fallback on
+    # error), ``manual`` (only honors inline ``[tag]`` prefixes you
+    # write yourself), ``off`` (no router at all).
+    task_routing_mode: str
 
     @classmethod
     def load(cls) -> Config:
@@ -123,6 +131,7 @@ class Config:
             browser_fast_path=_env_bool("BROWSER_FAST_PATH", default=False),
             browser_cdp_host=os.getenv("BROWSER_CDP_HOST", "localhost").strip(),
             browser_cdp_port=int(os.getenv("BROWSER_CDP_PORT", "29229")),
+            task_routing_mode=os.getenv("TASK_ROUTING", "auto").strip().lower(),
         )
         if cfg.rpd_warn_threshold >= cfg.rpd_halt_threshold:
             raise ValueError(
@@ -132,6 +141,11 @@ class Config:
         if not 1 <= cfg.vlm_image_quality <= 100:
             raise ValueError(
                 f"VLM_IMAGE_QUALITY must be in [1, 100]; got {cfg.vlm_image_quality}"
+            )
+        if cfg.task_routing_mode not in {"auto", "manual", "off"}:
+            raise ValueError(
+                f"TASK_ROUTING must be one of auto/manual/off; "
+                f"got {cfg.task_routing_mode!r}"
             )
         return cfg
 

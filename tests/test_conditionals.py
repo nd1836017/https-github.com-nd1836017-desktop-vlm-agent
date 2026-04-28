@@ -291,6 +291,49 @@ def test_maybe_handle_control_wait_until_passes_when_condition_seen(monkeypatch)
     assert "Welcome" in out.reason
 
 
+def test_wait_until_inside_non_taken_branch_is_skipped(monkeypatch):
+    """Regression: WAIT_UNTIL in a non-taken branch must be skipped.
+
+    Before the fix, the kind=="wait_until" path entered the polling
+    loop unconditionally, which (a) burned VLM quota for a directive
+    the user never intended to reach, and (b) could halt the run on
+    timeout for a branch that wasn't even taken.
+    """
+    from agent.agent import _maybe_handle_control
+    from agent.tasks_loader import TaskStep
+
+    fake_vlm = mock.Mock()
+    # If the bug regresses, this gets called and the test fails.
+    fake_vlm.check_condition.side_effect = AssertionError(
+        "WAIT_UNTIL inside non-taken branch must NOT poll the screen"
+    )
+    monkeypatch.setattr("agent.agent.capture_screenshot", lambda: object())
+
+    decisions: dict[int, bool] = {0: True}  # THEN branch was taken
+
+    wait_step = TaskStep(
+        text="WAIT_UNTIL [Sign in form]",
+        control_kind="wait_until",
+        condition_text="Sign in form",
+        active_block_id=0,
+        branch="else",  # WAIT_UNTIL is in the ELSE branch
+    )
+    out = _maybe_handle_control(
+        task_step=wait_step,
+        idx=4,
+        total_steps=6,
+        vlm=fake_vlm,
+        geometry=mock.Mock(),
+        branch_decisions=decisions,
+        wait_until_timeout_seconds=30,
+        wait_until_poll_seconds=0,
+    )
+    assert out is not None and out.passed
+    assert "skipped" in out.reason
+    assert "else" in out.reason
+    fake_vlm.check_condition.assert_not_called()
+
+
 def test_maybe_handle_control_wait_until_times_out(monkeypatch):
     """WAIT_UNTIL returns FAIL when condition stays False past the budget."""
     from agent.agent import _maybe_handle_control

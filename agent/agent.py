@@ -215,11 +215,47 @@ def _maybe_handle_control(
             ),
         )
 
-    # ELSE / END_IF — pure markers, no work.
+    # ELSE / END_IF — pure markers, no work. They MUST always process
+    # (regardless of branch) because they're the structural skeleton of
+    # the block; skipping them would leave branch_decisions stale on
+    # next iteration.
     if kind == "if_else":
         return VerificationResult(passed=True, reason="ELSE marker")
     if kind == "if_end":
         return VerificationResult(passed=True, reason="END_IF marker")
+
+    # Branch-skip check applies to BOTH plain action steps and
+    # WAIT_UNTIL. A WAIT_UNTIL inside the non-taken branch must NOT
+    # poll the screen — that would burn API quota and could halt the
+    # run on timeout for a directive the user never intended to reach.
+    block_id = task_step.active_block_id
+    if block_id is not None and task_step.branch is not None:
+        decision = branch_decisions.get(block_id)
+        if decision is None:
+            # No decision recorded — should never happen since IF runs
+            # before any of its inner steps. Defensive: log + execute.
+            log.warning(
+                "step %d in block %d has no recorded branch decision; "
+                "executing anyway.",
+                idx,
+                block_id,
+            )
+        else:
+            taken_branch = "then" if decision else "else"
+            if task_step.branch != taken_branch:
+                log.info(
+                    "Skipping step %d: branch %s not taken (IF block %d).",
+                    idx,
+                    task_step.branch,
+                    block_id,
+                )
+                return VerificationResult(
+                    passed=True,
+                    reason=(
+                        f"skipped: branch '{task_step.branch}' not taken "
+                        f"(IF block {block_id})"
+                    ),
+                )
 
     # WAIT_UNTIL [text] — poll the screen until the condition is true
     # or the timeout expires.
@@ -276,35 +312,8 @@ def _maybe_handle_control(
                 )
             time.sleep(poll)
 
-    # Non-control step: check whether it falls in a non-taken branch.
-    block_id = task_step.active_block_id
-    if block_id is not None and task_step.branch is not None:
-        decision = branch_decisions.get(block_id)
-        if decision is None:
-            # No decision recorded — should never happen since IF runs
-            # before any of its inner steps. Defensive: log + execute.
-            log.warning(
-                "step %d in block %d has no recorded branch decision; "
-                "executing anyway.",
-                idx,
-                block_id,
-            )
-            return None
-        taken_branch = "then" if decision else "else"
-        if task_step.branch != taken_branch:
-            log.info(
-                "Skipping step %d: branch %s not taken (IF block %d).",
-                idx,
-                task_step.branch,
-                block_id,
-            )
-            return VerificationResult(
-                passed=True,
-                reason=(
-                    f"skipped: branch '{task_step.branch}' not taken "
-                    f"(IF block {block_id})"
-                ),
-            )
+    # Plain action step that survived the branch-skip check above —
+    # let the run loop hand it to the planner.
     return None
 
 

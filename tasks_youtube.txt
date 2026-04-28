@@ -1,0 +1,5 @@
+# Task: open a YouTube video, exercising two-stage CLICK on the grid of thumbnails.
+Press Ctrl+L to focus the browser address bar
+Type "youtube.com" into the address bar
+Press the Enter key to navigate to youtube.com
+Click on the first video thumbnail in the YouTube home grid to open it

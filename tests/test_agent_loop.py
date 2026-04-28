@@ -596,6 +596,56 @@ def test_run_wait_until_timeout_halts(
     assert client.plan_calls == []
 
 
+def test_wait_until_timeout_does_not_advance_checkpoint(
+    fake_geometry, patch_pyautogui, tmp_path, monkeypatch
+):
+    """Regression: WAIT_UNTIL timeout must NOT bump last_completed_step.
+
+    Before the fix, the control-step path called state.advance() before
+    the passed check, so a WAIT_UNTIL timeout was recorded as
+    'completed'. On --resume the agent then skipped past it, never
+    giving the user a chance to retry.
+    """
+    from agent.state import load_state
+
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    fake_clock = iter([0.0, 0.0, 5.0, 5.0, 5.0])
+
+    def _mono():
+        try:
+            return next(fake_clock)
+        except StopIteration:
+            return 99.0
+
+    monkeypatch.setattr("time.monotonic", _mono)
+
+    cfg = _cfg(
+        tmp_path,
+        "before\nWAIT_UNTIL [Welcome back]\nafter\n",
+        wait_until_timeout_seconds=1.0,
+        wait_until_poll_seconds=0.0,
+    )
+    client = FakeClient(
+        plan_outputs=["CLICK [1,1]"],
+        verify_outputs=[VerificationResult(passed=True, reason="PASS")],
+    )
+    client._condition_outputs = [False]  # never satisfies
+    with (
+        mock.patch("agent.agent.GeminiClient", return_value=client),
+        mock.patch("agent.agent.detect_geometry", return_value=fake_geometry),
+    ):
+        assert run(cfg) == 1
+
+    # Step 1 (before) passed, step 2 (WAIT_UNTIL) timed out → halt.
+    # last_completed_step must be 1, NOT 2.
+    state = load_state(cfg.state_file)
+    assert state is not None
+    assert state.last_completed_step == 1, (
+        f"WAIT_UNTIL timeout advanced checkpoint to {state.last_completed_step};"
+        " --resume would skip the timed-out step."
+    )
+
+
 def test_run_skill_library_inlines_at_load_time(
     fake_geometry, patch_pyautogui, tmp_path
 ):
@@ -677,6 +727,71 @@ def test_resume_inside_if_block_rewinds_to_if_begin(
         assert run(cfg, resume=True) == 0
     # `do A` re-ran (rewind cost), then `do A2`, then `after`.
     assert [c["step"] for c in client2.plan_calls] == ["do A", "do A2", "after"]
+
+
+def test_resume_rewind_keeps_checkpoint_in_sync_across_multi_resume(
+    fake_geometry, patch_pyautogui, tmp_path
+):
+    """Regression: resume rewind must reset last_completed_step.
+
+    Before the fix, rewinding start_idx without resetting the state
+    object's last_completed_step caused advance() to drift ahead. On a
+    second --resume after another mid-block failure, last_completed_step
+    would point past the failed step and silently skip it.
+    """
+    from agent.state import load_state
+
+    cfg = _cfg(
+        tmp_path,
+        "before\n"
+        "IF [signed in] THEN\n"
+        "    do A\n"
+        "    do A2\n"
+        "END_IF\n"
+        "after\n",
+        max_replans_per_step=0,
+    )
+    # First run: pass before + IF + do A, fail do A2.
+    client1 = FakeClient(
+        plan_outputs=["CLICK [1,1]", "CLICK [2,2]", "CLICK [3,3]"],
+        verify_outputs=[
+            VerificationResult(passed=True, reason="PASS"),
+            VerificationResult(passed=True, reason="PASS"),
+            VerificationResult(passed=False, reason="FAIL"),
+        ],
+    )
+    client1._condition_outputs = [True]
+    with (
+        mock.patch("agent.agent.GeminiClient", return_value=client1),
+        mock.patch("agent.agent.detect_geometry", return_value=fake_geometry),
+    ):
+        assert run(cfg) == 1
+    state_after_run1 = load_state(cfg.state_file)
+    assert state_after_run1 is not None
+    assert state_after_run1.last_completed_step == 3  # before + IF + do A
+
+    # First resume: rewind to IF (step 2), re-run do A (3), fail do A2
+    # again (step 4). After fix: last_completed_step must be 3, not 5.
+    client2 = FakeClient(
+        plan_outputs=["CLICK [3,3]", "CLICK [4,4]"],
+        verify_outputs=[
+            VerificationResult(passed=True, reason="PASS"),  # do A
+            VerificationResult(passed=False, reason="FAIL"),  # do A2 fails
+        ],
+    )
+    client2._condition_outputs = [True]
+    with (
+        mock.patch("agent.agent.GeminiClient", return_value=client2),
+        mock.patch("agent.agent.detect_geometry", return_value=fake_geometry),
+    ):
+        assert run(cfg, resume=True) == 1
+    state_after_resume1 = load_state(cfg.state_file)
+    assert state_after_resume1 is not None
+    assert state_after_resume1.last_completed_step == 3, (
+        f"After rewind resume, expected lcs=3 but got "
+        f"{state_after_resume1.last_completed_step}; checkpoint counter "
+        "drifted ahead of the step index."
+    )
 
 
 # -----------------------------------------------------------------------------

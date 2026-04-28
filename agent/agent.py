@@ -1402,6 +1402,18 @@ def run(
                             rewind_idx,
                         )
                         start_idx = rewind_idx
+                        # Reset last_completed_step so subsequent
+                        # advance() calls track the rewound position.
+                        # Without this, the checkpoint counter drifts
+                        # ahead of the step index across multi-resume
+                        # cycles and steps get silently skipped.
+                        existing_state = AgentState(
+                            version=existing_state.version,
+                            tasks_file=existing_state.tasks_file,
+                            total_steps=existing_state.total_steps,
+                            last_completed_step=rewind_idx - 1,
+                            variables=dict(existing_state.variables),
+                        )
             log.info(
                 "Resuming from checkpoint: step %d/%d (file=%s)",
                 start_idx,
@@ -1545,8 +1557,32 @@ def run(
                 wait_until_poll_seconds=config.wait_until_poll_seconds,
             )
             if control_result is not None:
-                # Skipped or pure control directive: synthesize a
-                # passing verdict, persist progress, and move on.
+                # Always record the verdict in the run summary, even
+                # for failed control steps (so the artifact bundle
+                # shows the timeout reason).
+                artifact_writer.append_summary(
+                    step_idx=idx,
+                    step_text=step_text,
+                    passed=control_result.passed,
+                    reason=control_result.reason,
+                )
+                # Failed control directive (only WAIT_UNTIL timeout
+                # can produce this) must HALT *without* advancing the
+                # checkpoint — otherwise --resume would skip past the
+                # timed-out step. Mirrors the normal-step failure path
+                # below, which also halts pre-advance.
+                if not control_result.passed:
+                    msg = (
+                        f"\n[!] HALT at step {idx}/{len(steps)}: "
+                        f"{step_text}\n"
+                        f"    Reason: {control_result.reason}\n"
+                        "    The agent has stopped to prevent runaway actions."
+                    )
+                    print(msg, file=sys.stderr)
+                    log.error("Halting execution: %s", control_result.reason)
+                    return 1
+                # Passed control / skipped step: persist progress and
+                # move on.
                 state = state.advance()
                 if variables is not None:
                     state = state.with_variables(variables.to_dict())
@@ -1558,22 +1594,6 @@ def run(
                         config.state_file,
                         exc,
                     )
-                artifact_writer.append_summary(
-                    step_idx=idx,
-                    step_text=step_text,
-                    passed=control_result.passed,
-                    reason=control_result.reason,
-                )
-                if not control_result.passed:
-                    msg = (
-                        f"\n[!] HALT at step {idx}/{len(steps)}: "
-                        f"{step_text}\n"
-                        f"    Reason: {control_result.reason}\n"
-                        "    The agent has stopped to prevent runaway actions."
-                    )
-                    print(msg, file=sys.stderr)
-                    log.error("Halting execution: %s", control_result.reason)
-                    return 1
                 continue
 
             # Routing hint is per-step and frozen at run start; pass the

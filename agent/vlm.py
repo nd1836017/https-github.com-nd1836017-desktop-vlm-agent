@@ -926,6 +926,25 @@ class GeminiClient:
         log.debug("plan_action response: %r", text)
         return text, None
 
+    def check_condition(self, condition_text: str, screenshot: Image.Image) -> bool:
+        """Yes/no check: is ``condition_text`` visibly true on this screen?
+
+        Used by IF / WAIT_UNTIL. Reuses the verify path (PASS=True,
+        FAIL=False) so all the JSON / fallback handling is already
+        battle-tested. The verifier prompt is permissive enough for
+        natural-language conditions like ``Sign in to your account`` or
+        ``Welcome back`` — it already understands "the goal is to see
+        X on screen" framing.
+        """
+        framed_goal = (
+            f"The user wants to know whether the following text or "
+            f"condition is currently visible / true on the screen: "
+            f"\"{condition_text}\". "
+            f"Respond PASS if it is clearly visible, FAIL otherwise."
+        )
+        result = self.verify(framed_goal, screenshot)
+        return result.passed
+
     def verify(self, goal: str, screenshot: Image.Image) -> VerificationResult:
         """Ask the VLM to verify that the post-action state matches the goal."""
         prompt = (

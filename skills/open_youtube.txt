@@ -1,0 +1,6 @@
+# open_youtube — navigate to YouTube's homepage in the foreground browser.
+# Used as a building block for tasks like "search for a video", "play a
+# specific video", etc. Falls back to typing the URL into the address
+# bar if BROWSER_FAST_PATH is off.
+
+BROWSER_GO [https://www.youtube.com]

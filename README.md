@@ -437,6 +437,48 @@ The dashboard reads `RUN_ARTIFACTS_DIR` (default `runs/`) and shows a per-step t
 
 The dashboard requires `fastapi` and `uvicorn` (already in `requirements.txt`). The agent itself never imports them — they're lazy-loaded only when `--serve-dashboard` runs.
 
+### Skill library (USE)
+
+Skills are reusable `.txt` files in a configurable folder (`SKILLS_DIR`, default `./skills/`). Any tasks file can pull a skill in with a single line:
+
+```
+USE open_youtube
+search for "lo-fi beats"
+click the first video result
+```
+
+`USE <name>` expands inline at load time — the file's contents replace the directive before any other parsing runs. Skills can use every primitive (`REMEMBER`, `FOR_EACH_ROW`, `IF/ELSE`, `BROWSER_*`) and can call other skills. A cycle detector + max recursion depth (8) keeps things safe; path-traversal is rejected at the name level (`USE ../etc/passwd` raises a clear error).
+
+CLI helpers for authoring skills (work without an API key — useful for first-time setup):
+
+```
+python -m agent --list-skills              # show every skill with a one-line preview
+python -m agent --new-skill open_chrome    # scaffold skills/open_chrome.txt
+```
+
+`--new-skill` writes a starter template with a header comment and an example `BROWSER_GO`. Refuses to overwrite an existing skill unless `--overwrite-skill` is passed.
+
+### Conditional logic (IF / ELSE / END_IF / WAIT_UNTIL)
+
+Two new directives let a tasks file branch on what's currently visible on screen:
+
+```
+IF [Sign in to your account] THEN
+    click the email field
+    TYPE [{{var.email}}]
+    PRESS [enter]
+ELSE
+    skip — already signed in
+END_IF
+WAIT_UNTIL [Inbox]
+click the first message
+```
+
+- `IF [text on screen] THEN ... [ELSE ...] END_IF` — the agent takes one screenshot, asks the VLM whether the bracketed text is currently visible, and runs the matching branch. The non-taken branch is skipped (no planner call). Nesting and `IF` inside `FOR_EACH_ROW` are not supported in v1 (clear parse-time errors point you at the constraint).
+- `WAIT_UNTIL [text]` — polls every `WAIT_UNTIL_POLL_SECONDS` (default 2s) up to `WAIT_UNTIL_TIMEOUT_SECONDS` (default 30s). Halts the run on timeout. Cheap-ish: each poll is a single VLM call against the same prompt.
+
+Both directives reuse the verifier prompt path, so all the JSON / fallback handling that already keeps `verify` robust applies here too.
+
 ---
 
 ## Architecture

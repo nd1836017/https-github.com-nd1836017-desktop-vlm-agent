@@ -498,3 +498,49 @@ def test_cdp_target_is_real_page_filters_devtools() -> None:
     )
     assert real.is_real_page is True
     assert fake.is_real_page is False
+
+
+def test_cdp_target_is_real_page_accepts_chrome_internal_pages() -> None:
+    """Regression: a freshly-launched Chrome lands on chrome://newtab/.
+
+    Before the fix the allow-list rejected this, so connect() returned
+    False on a brand-new browser even though the page was perfectly
+    drivable. Now: deny-list — only devtools:// / chrome-extension://
+    are filtered out.
+    """
+    newtab = _CdpTarget(
+        target_id="1", url="chrome://newtab/", websocket_url="ws://x"
+    )
+    extension = _CdpTarget(
+        target_id="2",
+        url="chrome-extension://abcd/popup.html",
+        websocket_url="ws://x",
+    )
+    assert newtab.is_real_page is True
+    assert extension.is_real_page is False
+
+
+def test_open_websocket_passes_suppress_origin(monkeypatch) -> None:
+    """Regression: BrowserBridge must call ws.create_connection with
+    suppress_origin=True so Chrome 111+ accepts the connection even
+    when the user launched Chrome without --remote-allow-origins.
+    """
+    import sys
+    import types
+
+    import agent.browser_bridge as bb
+
+    captured: dict[str, object] = {}
+
+    def fake_create_connection(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return object()
+
+    fake_module = types.ModuleType("websocket")
+    fake_module.create_connection = fake_create_connection  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "websocket", fake_module)
+
+    bridge = bb.BrowserBridge()
+    bridge._open_websocket("ws://localhost:29229/devtools/page/abc")
+    assert captured["kwargs"].get("suppress_origin") is True

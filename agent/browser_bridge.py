@@ -69,19 +69,18 @@ class _CdpTarget:
 
     @property
     def is_real_page(self) -> bool:
-        """Skip Chrome's own UI tabs (devtools, extensions popup, etc.).
+        """Skip Chrome's own tooling tabs (devtools, extensions popup, etc.).
 
-        Real navigatable pages have ``http(s)://`` or ``about:`` URLs;
-        ``devtools://`` and ``chrome-extension://`` targets are tooling
-        windows we shouldn't drive.
+        Deny-list rather than allow-list: anything that's not a Chrome
+        internal tooling surface is treated as drivable. This is
+        important because a freshly-launched Chrome with no manual
+        navigation lands on ``chrome://newtab/``, and the previous
+        allow-list rejected it — meaning ``connect()`` returned False
+        on a brand-new browser.
         """
         u = self.url
-        return (
-            u.startswith("http://")
-            or u.startswith("https://")
-            or u.startswith("about:")
-            or u.startswith("file://")
-            or u == ""
+        return not (
+            u.startswith("devtools://") or u.startswith("chrome-extension://")
         )
 
 
@@ -304,7 +303,18 @@ class BrowserBridge:
                 "websocket-client package not installed; run pip install -r requirements.txt"
             ) from exc
         try:
-            ws = websocket.create_connection(ws_url, timeout=self._timeout)
+            # ``suppress_origin=True`` tells websocket-client not to
+            # send the Origin header at all. Chrome 111+ rejects CDP
+            # websocket connections whose Origin doesn't match an
+            # explicit allow-list, returning HTTP 403. With no Origin
+            # header, Chrome treats the connection as "no origin" and
+            # accepts it — so the bridge works even when the user
+            # launched Chrome without --remote-allow-origins. Belt and
+            # suspenders: launch-chrome.{sh,bat} now also pass the
+            # flag.
+            ws = websocket.create_connection(
+                ws_url, timeout=self._timeout, suppress_origin=True
+            )
         except Exception as exc:  # noqa: BLE001 — ws library raises broad
             raise BrowserBridgeUnavailable(
                 f"could not connect to {ws_url}: {exc}"

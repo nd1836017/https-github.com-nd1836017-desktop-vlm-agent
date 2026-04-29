@@ -38,8 +38,12 @@ if "%CHROME%"=="" (
     )
 )
 
+REM Chrome 111+ rejects CDP websocket connections whose Origin header
+REM doesn't match an explicit allow-list, returning HTTP 403. Without
+REM --remote-allow-origins the BrowserBridge cannot connect on stock
+REM Chrome. Localhost-only -- not a real attack surface.
 set DEBUG_FLAG=
-if not "%CDP_PORT%"=="0" set DEBUG_FLAG=--remote-debugging-port=%CDP_PORT%
+if not "%CDP_PORT%"=="0" set DEBUG_FLAG=--remote-debugging-port=%CDP_PORT% --remote-allow-origins=http://localhost:%CDP_PORT%
 
 echo [launch-chrome] profile=%PROFILE_DIR% url=%START_URL% cdp-port=%CDP_PORT%
 "%CHROME%" --user-data-dir="%PROFILE_DIR%" --no-first-run --no-default-browser-check %DEBUG_FLAG% "%START_URL%"

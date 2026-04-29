@@ -38,13 +38,18 @@ echo "[launch-chrome] profile=${PROFILE_DIR} url=${START_URL} cdp-port=${CDP_POR
 # the active tab without going through the VLM. Harmless when the agent
 # isn't using the fast path; only listens on localhost so it isn't a
 # remote-attack surface. Set CDP_PORT=0 to disable explicitly.
-DEBUG_FLAG=""
+DEBUG_FLAGS=()
 if [[ "${CDP_PORT}" != "0" ]]; then
-    DEBUG_FLAG="--remote-debugging-port=${CDP_PORT}"
+    DEBUG_FLAGS+=("--remote-debugging-port=${CDP_PORT}")
+    # Chrome 111+ rejects CDP websocket connections whose Origin header
+    # doesn't match an explicit allow-list, returning HTTP 403. Without
+    # this flag the BrowserBridge cannot connect on stock Chrome.
+    # Localhost-only — not a real attack surface.
+    DEBUG_FLAGS+=("--remote-allow-origins=http://localhost:${CDP_PORT}")
 fi
 exec "${CHROME}" \
     --user-data-dir="${PROFILE_DIR}" \
     --no-first-run \
     --no-default-browser-check \
-    ${DEBUG_FLAG} \
+    ${DEBUG_FLAGS[@]+"${DEBUG_FLAGS[@]}"} \
     "${START_URL}"

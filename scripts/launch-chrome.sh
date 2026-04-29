@@ -51,5 +51,5 @@ exec "${CHROME}" \
     --user-data-dir="${PROFILE_DIR}" \
     --no-first-run \
     --no-default-browser-check \
-    "${DEBUG_FLAGS[@]}" \
+    ${DEBUG_FLAGS[@]+"${DEBUG_FLAGS[@]}"} \
     "${START_URL}"

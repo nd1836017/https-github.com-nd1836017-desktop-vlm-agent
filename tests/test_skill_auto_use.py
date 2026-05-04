@@ -258,6 +258,102 @@ def test_apply_skill_auto_use_passes_through_when_skills_dir_missing():
     assert [s.text for s in result] == ["open youtube"]
 
 
+def test_apply_skill_auto_use_rebases_block_ids_to_avoid_collision(tmp_path):
+    """Bug 1 (Devin Review): a skill that contains its own IF block
+    must not reuse block_ids already allocated by the main tasks file.
+    """
+    skills_dir = _write(
+        tmp_path,
+        "alpha",
+        "# TRIGGERS: trigger\nIF [some text] THEN\nclick foo\nEND_IF\n",
+    )
+    # Simulate the main-file expansion: one IF block with block_id=0,
+    # plus an unrelated step that triggers the skill.
+    parent_steps = [
+        TaskStep(
+            text="parent condition",
+            control_kind="if_begin",
+            block_id=0,
+            active_block_id=0,
+        ),
+        TaskStep(
+            text="trigger",
+            active_block_id=0,
+            branch="then",
+        ),
+        TaskStep(text="parent end", control_kind="if_end", block_id=0),
+    ]
+    result = apply_skill_auto_use(
+        parent_steps, skills_dir=skills_dir, enabled=True
+    )
+    # The skill's IF block_id MUST NOT be 0 (which is taken by the
+    # parent IF). It should be offset to 1+.
+    skill_block_id_values = {
+        s.block_id for s in result if s.block_id is not None
+    }
+    assert 0 in skill_block_id_values  # parent's IF kept its id
+    # Skill expansion got >= 1
+    assert any(bid >= 1 for bid in skill_block_id_values if bid is not None)
+
+
+def test_apply_skill_auto_use_inherits_outer_block_context(tmp_path):
+    """Bug 2 (Devin Review): when the matched step is inside an IF
+    block, the skill's top-level substeps must inherit
+    ``active_block_id`` / ``branch`` from the matched step. Otherwise
+    they bypass the branch-skip check and execute unconditionally.
+    """
+    skills_dir = _write(
+        tmp_path,
+        "open_youtube",
+        "# TRIGGERS: youtube\nBROWSER_GO [https://www.youtube.com]\n",
+    )
+    # Matched step is inside an IF/ELSE, in the THEN branch.
+    parent_steps = [
+        TaskStep(
+            text="open youtube",
+            active_block_id=42,
+            branch="then",
+        ),
+    ]
+    result = apply_skill_auto_use(
+        parent_steps, skills_dir=skills_dir, enabled=True
+    )
+    # The expanded BROWSER_GO substep should inherit the outer
+    # active_block_id and branch.
+    assert len(result) == 1
+    assert result[0].active_block_id == 42
+    assert result[0].branch == "then"
+
+
+def test_apply_skill_auto_use_preserves_inner_if_branch_for_substeps(tmp_path):
+    """When the skill itself opens an IF block, its OWN substeps
+    inside that block keep their inner branch — they don't get
+    overwritten by the outer step's branch.
+    """
+    skills_dir = _write(
+        tmp_path,
+        "guarded",
+        "# TRIGGERS: trigger\nIF [some text] THEN\nclick foo\nEND_IF\n",
+    )
+    # Outer IF has active_block_id=10, branch="else" (this matched step
+    # is in the ELSE branch of an outer IF).
+    parent_steps = [TaskStep(text="trigger", active_block_id=10, branch="else")]
+    result = apply_skill_auto_use(
+        parent_steps, skills_dir=skills_dir, enabled=True
+    )
+    # The IF/END_IF control directives from the skill should have an
+    # offset block_id that's NOT 10. Their inner action ("click foo")
+    # should belong to the SKILL's IF block, not the outer one.
+    inner_action = next(
+        (s for s in result if s.text == "click foo"), None
+    )
+    assert inner_action is not None
+    # It must NOT take on the outer block_id of 10.
+    assert inner_action.active_block_id != 10
+    # And the branch should be the skill's "then", not "else".
+    assert inner_action.branch == "then"
+
+
 def test_apply_skill_auto_use_user_example(tmp_path):
     """The exact scenario the user described:
 

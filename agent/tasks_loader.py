@@ -318,6 +318,19 @@ def apply_skill_auto_use(
     if not triggers or skills_dir is None:
         return list(steps)
 
+    # block_id offset bookkeeping for Bug 1:
+    # ``_expand`` starts its block_id counter at 0 every time it's
+    # called. The main-file expansion already used ids 0..K. Each
+    # subsequent skill expansion would also start at 0 unless we
+    # rebase its block_ids past the already-allocated range. We
+    # track ``next_free_block_id`` as one-past the current max,
+    # initialized from the existing step list and bumped after each
+    # skill expansion.
+    existing_block_ids = [
+        s.block_id for s in steps if s.block_id is not None
+    ]
+    next_free_block_id = max(existing_block_ids, default=-1) + 1
+
     out: list[TaskStep] = []
     matched_total = 0
     for step in steps:
@@ -343,6 +356,24 @@ def apply_skill_auto_use(
             )
             out.append(step)
             continue
+        # Rewrite the skill's substeps to:
+        #   (1) offset their block_ids past the existing range so they
+        #       don't collide with main-file IF blocks (Bug 1);
+        #   (2) inherit the matched step's outer ``active_block_id`` /
+        #       ``branch`` so the run loop's branch-skip check still
+        #       applies to the expansion (Bug 2). Substeps that
+        #       already have their OWN active_block_id (from an IF
+        #       block inside the skill) keep theirs.
+        sub_steps = _rebase_and_inherit(
+            sub_steps,
+            block_id_offset=next_free_block_id,
+            outer_active_block_id=step.active_block_id,
+            outer_branch=step.branch,
+        )
+        # Bump next_free past anything we just allocated.
+        for sub in sub_steps:
+            if sub.block_id is not None and sub.block_id >= next_free_block_id:
+                next_free_block_id = sub.block_id + 1
         log.info(
             "skill auto-use: matched %r → step %r (expanded into %d sub-step(s))",
             skill_name,
@@ -380,6 +411,58 @@ def _expand_skill_into_steps(
         base_dir=skills_dir,
         csv_override=None,
     )
+
+
+def _rebase_and_inherit(
+    sub_steps: Sequence[TaskStep],
+    *,
+    block_id_offset: int,
+    outer_active_block_id: int | None,
+    outer_branch: str | None,
+) -> list[TaskStep]:
+    """Rewrite a skill expansion's substeps for safe inline injection.
+
+    Two transforms applied:
+
+    * ``block_id`` and ``active_block_id`` (when set) are offset by
+      ``block_id_offset``. ``_expand()`` starts its counter at 0 on
+      every call, so without this we'd collide with block IDs the
+      main-file expansion already allocated. The offset is added
+      uniformly; relative pairing of if_begin/if_else/if_end inside
+      the skill is preserved.
+    * Steps that have NO ``active_block_id`` of their own (i.e. they
+      live at the skill's top level) inherit the matched step's
+      outer ``active_block_id`` / ``branch`` so the run loop's
+      branch-skip check still applies. Substeps that already declare
+      their own ``active_block_id`` (from an IF inside the skill)
+      keep theirs — the rebase already shifted those to a fresh
+      range.
+    """
+    out: list[TaskStep] = []
+    for step in sub_steps:
+        new_block_id = (
+            step.block_id + block_id_offset if step.block_id is not None
+            else None
+        )
+        if step.active_block_id is not None:
+            # The substep is inside the skill's OWN IF block. Keep
+            # its (now offset) active_block_id and branch — DO NOT
+            # overwrite with the outer block context.
+            new_active_block_id = step.active_block_id + block_id_offset
+            new_branch = step.branch
+        else:
+            # Top-level skill step: inherit the outer context.
+            new_active_block_id = outer_active_block_id
+            new_branch = outer_branch
+        out.append(
+            replace(
+                step,
+                block_id=new_block_id,
+                active_block_id=new_active_block_id,
+                branch=new_branch,
+            )
+        )
+    return out
 
 
 def _expand(

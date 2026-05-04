@@ -681,6 +681,15 @@ class GeminiClient:
             response_mime_type="application/json",
             response_schema=ExtractResponseModel,
         )
+        self._describe_config = types.GenerateContentConfig(
+            system_instruction=(
+                "You are a screen description assistant for a desktop "
+                "automation agent. Describe screenshots concisely and "
+                "factually in plain English. Do NOT use VERDICT: prefixes "
+                "or any structured format — write a single natural-language "
+                "sentence."
+            ),
+        )
         log.info(
             "Initialized Gemini client with model=%s (json_output=%s)",
             model_name,
@@ -942,7 +951,7 @@ class GeminiClient:
             "actually visible."
         )
         response = self._generate(
-            "describe_screen", [prompt, screenshot], self._verify_config
+            "describe_screen", [prompt, screenshot], self._describe_config
         )
         text = (response.text or "").strip()
         return text

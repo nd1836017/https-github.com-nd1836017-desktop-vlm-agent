@@ -1740,12 +1740,20 @@ def run(
 
             # action_text is resolved inside the writer from the most recent
             # save_plan() call for this step — no placeholder needed.
-            artifact_writer.append_summary(
-                step_idx=idx,
-                step_text=step_text,
-                passed=result.passed,
-                reason=result.reason,
-            )
+            #
+            # We write the PASS summary entry immediately. The FAIL entry
+            # is deferred until after the smart-skip escalation runs,
+            # because smart-skip can OVERRIDE a failed step into a
+            # synthetic PASS (skip_current / jump_to). Writing the FAIL
+            # row here unconditionally would leave summary.json with two
+            # contradictory entries for the same step_idx.
+            if result.passed:
+                artifact_writer.append_summary(
+                    step_idx=idx,
+                    step_text=step_text,
+                    passed=True,
+                    reason=result.reason,
+                )
 
             if not result.passed:
                 # Smart step-skip escalation: instead of halting
@@ -1869,6 +1877,16 @@ def run(
                     # through to the legacy halt path below — the
                     # difference is logged but the run-loop behaviour
                     # is the same: stop and prompt the user to fix.
+
+                # Smart-skip didn't override the failure: write the
+                # genuine FAIL row to summary.json now (deferred from
+                # above so we never get duplicate contradictory entries).
+                artifact_writer.append_summary(
+                    step_idx=idx,
+                    step_text=step_text,
+                    passed=False,
+                    reason=result.reason,
+                )
 
                 msg = (
                     f"\n[!] HALT at step {idx}/{len(steps)}: {step_text}\n"

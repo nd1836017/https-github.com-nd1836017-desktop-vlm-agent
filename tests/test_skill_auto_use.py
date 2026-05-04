@@ -268,7 +268,8 @@ def test_apply_skill_auto_use_rebases_block_ids_to_avoid_collision(tmp_path):
         "# TRIGGERS: trigger\nIF [some text] THEN\nclick foo\nEND_IF\n",
     )
     # Simulate the main-file expansion: one IF block with block_id=0,
-    # plus an unrelated step that triggers the skill.
+    # plus an unrelated trigger step at top level (the trigger step is
+    # OUTSIDE the IF, so the pseudo-nested guard doesn't apply).
     parent_steps = [
         TaskStep(
             text="parent condition",
@@ -277,11 +278,13 @@ def test_apply_skill_auto_use_rebases_block_ids_to_avoid_collision(tmp_path):
             active_block_id=0,
         ),
         TaskStep(
-            text="trigger",
+            text="inner action",
             active_block_id=0,
             branch="then",
         ),
         TaskStep(text="parent end", control_kind="if_end", block_id=0),
+        # Trigger step is at top level — no active_block_id.
+        TaskStep(text="trigger"),
     ]
     result = apply_skill_auto_use(
         parent_steps, skills_dir=skills_dir, enabled=True
@@ -328,30 +331,57 @@ def test_apply_skill_auto_use_inherits_outer_block_context(tmp_path):
 def test_apply_skill_auto_use_preserves_inner_if_branch_for_substeps(tmp_path):
     """When the skill itself opens an IF block, its OWN substeps
     inside that block keep their inner branch — they don't get
-    overwritten by the outer step's branch.
+    overwritten by the outer step's branch. This applies to skills
+    that are matched at top level (not inside an outer IF).
     """
     skills_dir = _write(
         tmp_path,
         "guarded",
         "# TRIGGERS: trigger\nIF [some text] THEN\nclick foo\nEND_IF\n",
     )
-    # Outer IF has active_block_id=10, branch="else" (this matched step
-    # is in the ELSE branch of an outer IF).
-    parent_steps = [TaskStep(text="trigger", active_block_id=10, branch="else")]
+    # Top-level matched step (no outer IF).
+    parent_steps = [TaskStep(text="trigger")]
     result = apply_skill_auto_use(
         parent_steps, skills_dir=skills_dir, enabled=True
     )
-    # The IF/END_IF control directives from the skill should have an
-    # offset block_id that's NOT 10. Their inner action ("click foo")
-    # should belong to the SKILL's IF block, not the outer one.
     inner_action = next(
         (s for s in result if s.text == "click foo"), None
     )
     assert inner_action is not None
-    # It must NOT take on the outer block_id of 10.
-    assert inner_action.active_block_id != 10
-    # And the branch should be the skill's "then", not "else".
+    # The skill's own IF wraps it in branch="then".
     assert inner_action.branch == "then"
+    # And its block_id is the offset value (>= 0) — not None.
+    assert inner_action.active_block_id is not None
+
+
+def test_apply_skill_auto_use_refuses_pseudo_nested_if(tmp_path, caplog):
+    """Devin Review fix: when the matched step is inside an outer IF
+    block AND the candidate skill contains its own IF directives,
+    refuse the auto-expansion and keep the original step. TaskStep
+    models a single active_block_id per step, so pseudo-nesting is
+    not safely representable — the skill's control directives would
+    bypass the outer branch-skip check.
+    """
+    skills_dir = _write(
+        tmp_path,
+        "guarded",
+        "# TRIGGERS: trigger\nIF [inner cond] THEN\nclick foo\nEND_IF\n",
+    )
+    parent_steps = [TaskStep(text="trigger", active_block_id=10, branch="else")]
+    import logging
+    with caplog.at_level(logging.WARNING):
+        result = apply_skill_auto_use(
+            parent_steps, skills_dir=skills_dir, enabled=True
+        )
+    # Auto-use refused: original step kept unchanged.
+    assert len(result) == 1
+    assert result[0].text == "trigger"
+    assert result[0].active_block_id == 10
+    # And a warning was logged with enough context to debug.
+    assert any(
+        "refusing to expand" in rec.message and "guarded" in rec.message
+        for rec in caplog.records
+    )
 
 
 def test_apply_skill_auto_use_user_example(tmp_path):

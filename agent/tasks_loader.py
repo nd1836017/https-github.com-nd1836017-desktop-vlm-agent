@@ -356,6 +356,34 @@ def apply_skill_auto_use(
             )
             out.append(step)
             continue
+        # Pseudo-nested IF guard: TaskStep models a single
+        # ``active_block_id`` per step, so we cannot represent a step
+        # that's inside the outer IF AND inside the skill's own IF.
+        # If the matched step lives inside an outer IF block AND the
+        # skill itself opens its own IF block, the skill's control
+        # directives would execute regardless of the outer branch
+        # decision (``_maybe_handle_control`` runs before the
+        # branch-skip check). Refuse the auto-use in that case and
+        # keep the original step — manual ``USE`` still works for
+        # users who have verified the nesting interaction is safe
+        # for their tasks file.
+        if step.active_block_id is not None and any(
+            sub.control_kind is not None for sub in sub_steps
+        ):
+            log.warning(
+                "skill auto-use: refusing to expand %r at step %r — "
+                "matched step is inside an outer IF block (active_block_id=%s) "
+                "and the skill contains its own IF/control directives. "
+                "Pseudo-nesting is not supported in v1 (see TaskStep model). "
+                "Leaving the step unchanged; use manual `USE %s` if you've "
+                "verified the nested interaction is correct for your task.",
+                skill_name,
+                step.text,
+                step.active_block_id,
+                skill_name,
+            )
+            out.append(step)
+            continue
         # Rewrite the skill's substeps to:
         #   (1) offset their block_ids past the existing range so they
         #       don't collide with main-file IF blocks (Bug 1);

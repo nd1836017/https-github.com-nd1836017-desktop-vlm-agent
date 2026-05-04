@@ -1,6 +1,7 @@
 # open_gmail — open Gmail in the foreground browser and wait for the
 # inbox to load. The WAIT_UNTIL guards against acting before the inbox
 # has finished rendering on slow connections.
+# TRIGGERS: gmail, open email, open mail, open inbox, check email
 
 BROWSER_GO [https://mail.google.com]
 WAIT_UNTIL [Inbox]

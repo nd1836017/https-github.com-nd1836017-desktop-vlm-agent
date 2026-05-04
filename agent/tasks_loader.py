@@ -42,7 +42,12 @@ from dataclasses import dataclass, replace
 from io import StringIO
 from pathlib import Path
 
-from .skills import expand_use_directives
+from .skills import (
+    SkillError,
+    expand_use_directives,
+    find_skill_for_step,
+    load_skill_triggers,
+)
 from .task_router import RoutingHint, parse_inline_annotation
 
 log = logging.getLogger(__name__)
@@ -94,6 +99,67 @@ class TaskStep:
     condition_text: str | None = None
     wait_timeout_seconds: float | None = None
     wait_poll_seconds: float | None = None
+    # Smart step-skip manual annotation. When True, the agent runs an
+    # "is the goal already on screen?" check BEFORE the planner ever
+    # fires for this step — if it is, the step is recorded as a
+    # synthetic PASS and the run advances. Set by a leading
+    # ``[skippable]`` prefix on the tasks.txt line. Always False for
+    # control-flow directives (IF/ELSE/END_IF/WAIT_UNTIL).
+    skippable: bool = False
+
+
+_SKIPPABLE_RE = re.compile(
+    r"^\s*\[\s*skippable\s*\]\s*(?P<text>.+?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _parse_step_annotations(line: str) -> tuple[RoutingHint | None, bool, str]:
+    """Strip leading ``[routing]`` and ``[skippable]`` annotations.
+
+    Both annotations are independent; either or both may appear in
+    any order at the start of the line:
+
+        ``[browser] click submit``                  → routing only
+        ``[skippable] click submit``                → skippable only
+        ``[skippable] [browser] click submit``      → both
+        ``[browser] [skippable] click submit``      → both (any order)
+
+    Returns ``(routing_hint, skippable, remaining_text)``. We loop
+    until neither pattern matches the head, so a third unrecognised
+    bracket prefix (e.g. ``[admin]`` as a literal placeholder) is
+    left untouched on the line — same conservative behaviour as the
+    underlying ``parse_inline_annotation``.
+    """
+    skippable = False
+    hint: RoutingHint | None = None
+    remaining = line
+    # Cap at 4 iterations so a pathological "[skippable] [browser]
+    # [skippable] …" line can't loop forever. In practice we expect
+    # at most 2 prefixes.
+    for _ in range(4):
+        next_hint, next_remaining = parse_inline_annotation(remaining)
+        if next_hint is not None and next_hint.source == "manual":
+            # Last-write-wins on routing — but a duplicate hint is a
+            # red flag in the user's tasks file. We don't raise (the
+            # router/run loop tolerates it) but we do log so it's
+            # visible.
+            if hint is not None:
+                log.warning(
+                    "tasks file: multiple routing annotations on a single "
+                    "line; using the last one (%r).",
+                    next_hint.complexity,
+                )
+            hint = next_hint
+            remaining = next_remaining
+            continue
+        skip_match = _SKIPPABLE_RE.match(remaining)
+        if skip_match is not None:
+            skippable = True
+            remaining = skip_match.group("text")
+            continue
+        break
+    return hint, skippable, remaining
 
 
 _FOR_EACH_RE = re.compile(
@@ -206,6 +272,224 @@ def attach_routing_hints(
             out.append(step)
             continue
         out.append(replace(step, routing_hint=auto_hint))
+    return out
+
+
+def apply_skill_auto_use(
+    steps: Sequence[TaskStep],
+    *,
+    skills_dir: Path | None,
+    enabled: bool,
+) -> list[TaskStep]:
+    """Auto-expand skill triggers in a TaskStep list.
+
+    For each step whose text matches a skill's ``# TRIGGERS:`` keyword
+    list, REPLACE the step with the parsed contents of that skill.
+    Skills are read from ``skills_dir``; control directives inside
+    the skill (IF/ELSE/WAIT_UNTIL/etc.) are re-parsed via the same
+    loader path used by ``load_steps``, so a skill that opens an IF
+    block also gets a matching control_kind / block_id on its
+    substeps.
+
+    Single-pass design: substeps produced by an auto-expansion are
+    NOT themselves re-checked for matches. This guarantees no
+    infinite expansion even if a skill's content text happens to
+    contain another skill's trigger keyword.
+
+    Steps that ARE skipped from matching:
+      * Control-flow directives (``IF``/``ELSE``/``END_IF``/``WAIT_UNTIL``).
+        These are run-time control structures, not user actions; we
+        never expand a skill in their place.
+      * Steps whose ``routing_hint.source == "manual"``. The user
+        has already declared an explicit routing intent for these,
+        so we treat them as "do not touch".
+
+    Returns ``list(steps)`` unchanged when:
+      * ``enabled`` is ``False``;
+      * ``skills_dir`` is None or empty;
+      * no skill declares a ``# TRIGGERS:`` header.
+
+    Errors expanding an individual skill are logged and the original
+    step kept (skill auto-use is advisory; never crashes the run).
+    """
+    if not enabled:
+        return list(steps)
+    triggers = load_skill_triggers(skills_dir)
+    if not triggers or skills_dir is None:
+        return list(steps)
+
+    # block_id offset bookkeeping for Bug 1:
+    # ``_expand`` starts its block_id counter at 0 every time it's
+    # called. The main-file expansion already used ids 0..K. Each
+    # subsequent skill expansion would also start at 0 unless we
+    # rebase its block_ids past the already-allocated range. We
+    # track ``next_free_block_id`` as one-past the current max,
+    # initialized from the existing step list and bumped after each
+    # skill expansion.
+    existing_block_ids = [
+        s.block_id for s in steps if s.block_id is not None
+    ]
+    next_free_block_id = max(existing_block_ids, default=-1) + 1
+
+    out: list[TaskStep] = []
+    matched_total = 0
+    for step in steps:
+        if step.control_kind is not None:
+            out.append(step)
+            continue
+        if step.routing_hint is not None and step.routing_hint.source == "manual":
+            out.append(step)
+            continue
+        skill_name = find_skill_for_step(step.text, triggers)
+        if skill_name is None:
+            out.append(step)
+            continue
+        try:
+            sub_steps = _expand_skill_into_steps(skill_name, skills_dir)
+        except (SkillError, TasksLoadError) as exc:
+            log.warning(
+                "skill auto-use: failed to expand %r for step %r: %s; "
+                "leaving step unchanged.",
+                skill_name,
+                step.text,
+                exc,
+            )
+            out.append(step)
+            continue
+        # Pseudo-nested IF guard: TaskStep models a single
+        # ``active_block_id`` per step, so we cannot represent a step
+        # that's inside the outer IF AND inside the skill's own IF.
+        # If the matched step lives inside an outer IF block AND the
+        # skill itself opens its own IF block, the skill's control
+        # directives would execute regardless of the outer branch
+        # decision (``_maybe_handle_control`` runs before the
+        # branch-skip check). Refuse the auto-use in that case and
+        # keep the original step — manual ``USE`` still works for
+        # users who have verified the nesting interaction is safe
+        # for their tasks file.
+        if step.active_block_id is not None and any(
+            sub.control_kind is not None for sub in sub_steps
+        ):
+            log.warning(
+                "skill auto-use: refusing to expand %r at step %r — "
+                "matched step is inside an outer IF block (active_block_id=%s) "
+                "and the skill contains its own IF/control directives. "
+                "Pseudo-nesting is not supported in v1 (see TaskStep model). "
+                "Leaving the step unchanged; use manual `USE %s` if you've "
+                "verified the nested interaction is correct for your task.",
+                skill_name,
+                step.text,
+                step.active_block_id,
+                skill_name,
+            )
+            out.append(step)
+            continue
+        # Rewrite the skill's substeps to:
+        #   (1) offset their block_ids past the existing range so they
+        #       don't collide with main-file IF blocks (Bug 1);
+        #   (2) inherit the matched step's outer ``active_block_id`` /
+        #       ``branch`` so the run loop's branch-skip check still
+        #       applies to the expansion (Bug 2). Substeps that
+        #       already have their OWN active_block_id (from an IF
+        #       block inside the skill) keep theirs.
+        sub_steps = _rebase_and_inherit(
+            sub_steps,
+            block_id_offset=next_free_block_id,
+            outer_active_block_id=step.active_block_id,
+            outer_branch=step.branch,
+        )
+        # Bump next_free past anything we just allocated.
+        for sub in sub_steps:
+            if sub.block_id is not None and sub.block_id >= next_free_block_id:
+                next_free_block_id = sub.block_id + 1
+        log.info(
+            "skill auto-use: matched %r → step %r (expanded into %d sub-step(s))",
+            skill_name,
+            step.text,
+            len(sub_steps),
+        )
+        out.extend(sub_steps)
+        matched_total += 1
+    if matched_total:
+        log.info(
+            "skill auto-use: expanded %d step(s) using %d skill trigger set(s)",
+            matched_total,
+            len(triggers),
+        )
+    return out
+
+
+def _expand_skill_into_steps(
+    skill_name: str, skills_dir: Path
+) -> list[TaskStep]:
+    """Produce a TaskStep list from the contents of one skill.
+
+    Re-uses the same USE-expansion + control-flow parser as
+    ``load_steps``, so the skill's IF/ELSE/WAIT_UNTIL blocks are
+    fully understood. ``base_dir`` for FOR_EACH_ROW CSVs defaults to
+    ``skills_dir`` — skills almost never use FOR_EACH_ROW (a CSV
+    inside a skill folder is unusual) but when they do, relative
+    CSV paths resolve against the skills directory.
+    """
+    raw_lines = expand_use_directives(
+        [f"USE {skill_name}"], skills_dir=skills_dir
+    )
+    return _expand(
+        raw_lines,
+        base_dir=skills_dir,
+        csv_override=None,
+    )
+
+
+def _rebase_and_inherit(
+    sub_steps: Sequence[TaskStep],
+    *,
+    block_id_offset: int,
+    outer_active_block_id: int | None,
+    outer_branch: str | None,
+) -> list[TaskStep]:
+    """Rewrite a skill expansion's substeps for safe inline injection.
+
+    Two transforms applied:
+
+    * ``block_id`` and ``active_block_id`` (when set) are offset by
+      ``block_id_offset``. ``_expand()`` starts its counter at 0 on
+      every call, so without this we'd collide with block IDs the
+      main-file expansion already allocated. The offset is added
+      uniformly; relative pairing of if_begin/if_else/if_end inside
+      the skill is preserved.
+    * Steps that have NO ``active_block_id`` of their own (i.e. they
+      live at the skill's top level) inherit the matched step's
+      outer ``active_block_id`` / ``branch`` so the run loop's
+      branch-skip check still applies. Substeps that already declare
+      their own ``active_block_id`` (from an IF inside the skill)
+      keep theirs — the rebase already shifted those to a fresh
+      range.
+    """
+    out: list[TaskStep] = []
+    for step in sub_steps:
+        new_block_id = (
+            step.block_id + block_id_offset if step.block_id is not None
+            else None
+        )
+        if step.active_block_id is not None:
+            # The substep is inside the skill's OWN IF block. Keep
+            # its (now offset) active_block_id and branch — DO NOT
+            # overwrite with the outer block context.
+            new_active_block_id = step.active_block_id + block_id_offset
+            new_branch = step.branch
+        else:
+            # Top-level skill step: inherit the outer context.
+            new_active_block_id = outer_active_block_id
+            new_branch = outer_branch
+        out.append(
+            replace(
+                step,
+                block_id=new_block_id,
+                active_block_id=new_active_block_id,
+                branch=new_branch,
+            )
+        )
     return out
 
 
@@ -393,13 +677,14 @@ def _expand(
                 f"Line {lineno}: '{{{{row.<field>}}}}' placeholder used "
                 f"outside a FOR_EACH_ROW block (no CSV row to substitute)."
             )
-        hint, cleaned = parse_inline_annotation(stripped)
+        hint, skippable, cleaned = _parse_step_annotations(stripped)
         out.append(
             TaskStep(
                 text=cleaned,
                 routing_hint=hint,
                 active_block_id=if_block_id if if_state is not None else None,
                 branch=if_state,
+                skippable=skippable,
             )
         )
 
@@ -453,13 +738,14 @@ def _expand_block(
             # Strip inline routing annotations on FOR_EACH_ROW body lines too.
             # The same ``[browser-fast] click submit`` syntax should work
             # whether the line is inside or outside a loop.
-            hint, cleaned = parse_inline_annotation(text)
+            hint, skippable, cleaned = _parse_step_annotations(text)
             expanded.append(
                 TaskStep(
                     text=cleaned,
                     row_index=row_idx,
                     csv_name=csv_name,
                     routing_hint=hint,
+                    skippable=skippable,
                 )
             )
     return expanded

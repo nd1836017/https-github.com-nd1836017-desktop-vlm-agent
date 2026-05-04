@@ -85,6 +85,26 @@ class Config:
     # left in case we want to evolve them independently later.
     wait_until_timeout_seconds: float
     wait_until_poll_seconds: float
+    # Smart step-skip: when ``smart_skip_enabled`` is True, after a
+    # step exhausts its replan budget the run does a 2-tier diagnosis
+    # before halting:
+    #   Tier 2 — three yes/no VLM checks (already done? previous-state
+    #            still on screen? unrelated screen?)
+    #   Tier 3 — open-ended classify-and-jump (describe screen, then
+    #            ask which step matches; jump ahead if a future step
+    #            is recognized).
+    # ``smart_skip_max_tier`` clamps how aggressive the escalation
+    # gets: 1 = retry only (legacy behavior), 2 = retry + Tier 2 only,
+    # 3 = full escalation (default).
+    smart_skip_enabled: bool
+    smart_skip_max_tier: int
+    # Skill auto-use: when ``True`` (default), at run start the agent
+    # scans every step's text and auto-replaces any whose text matches
+    # a known skill's ``# TRIGGERS:`` keyword list with that skill's
+    # full content. Manual ``USE skill`` directives still work and are
+    # always processed first. Set ``SKILL_AUTO_USE=off`` to disable
+    # auto-detection (manual USE remains available).
+    skill_auto_use_enabled: bool
 
     @classmethod
     def load(cls) -> Config:
@@ -159,6 +179,11 @@ class Config:
             wait_until_poll_seconds=float(
                 os.getenv("WAIT_UNTIL_POLL_SECONDS", "2.0")
             ),
+            smart_skip_enabled=_env_bool("SMART_SKIP", default=True),
+            smart_skip_max_tier=max(
+                1, min(3, int(os.getenv("SMART_SKIP_MAX_TIER", "3")))
+            ),
+            skill_auto_use_enabled=_env_bool("SKILL_AUTO_USE", default=True),
         )
         if cfg.rpd_warn_threshold >= cfg.rpd_halt_threshold:
             raise ValueError(

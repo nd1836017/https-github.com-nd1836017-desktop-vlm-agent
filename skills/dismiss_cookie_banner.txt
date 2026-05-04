@@ -1,6 +1,7 @@
 # dismiss_cookie_banner — click the most common "Accept all" / "OK"
 # cookie banner buttons if they're on screen. Wrapped in IF so it does
 # nothing when there's no banner.
+# TRIGGERS: cookie banner, accept cookies, gdpr, dismiss cookies
 
 IF [Accept all cookies] THEN
     click the "Accept all" button

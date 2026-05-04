@@ -458,6 +458,48 @@ python -m agent --new-skill open_chrome    # scaffold skills/open_chrome.txt
 
 `--new-skill` writes a starter template with a header comment and an example `BROWSER_GO`. Refuses to overwrite an existing skill unless `--overwrite-skill` is passed.
 
+#### Skill auto-use (`# TRIGGERS:` headers)
+
+Skills can opt into automatic invocation by declaring a comma-separated list of keyword triggers in a header comment:
+
+```
+# open_youtube — navigate to YouTube
+# TRIGGERS: youtube, yt, music video
+
+BROWSER_GO [https://www.youtube.com]
+```
+
+When `SKILL_AUTO_USE=on` (default), at run start the agent scans every step's text and replaces any whose text contains a triggered keyword with that skill's content. So:
+
+```
+play justin bieber on yt
+```
+
+…gets decomposed by the task decomposer into atomic steps, then the resulting `open yt` substep auto-matches `open_youtube`'s `yt` trigger and is replaced inline by `BROWSER_GO [https://www.youtube.com]`. Set `SKILL_AUTO_USE=off` to disable; manual `USE skill_name` still works regardless. Matching is word-bounded (no substring false positives like `yt` in `crypto`), case-insensitive, and prefers the longest-trigger skill when multiple skills could match.
+
+### Smart step-skip (3-tier escalation on failure)
+
+By default the agent halts the run when a step exhausts its replan budget. With `SMART_SKIP=on` (default), the agent first asks the VLM:
+
+- **Tier 2** — *"Is the goal of this step already visible on screen?"* If yes, mark the step PASS (synthetic) and continue. If no, *"Is the screen showing something completely off-track?"* If yes, halt with a clear reason. (1–2 yes/no calls.)
+- **Tier 3** — *"Describe this screen in one sentence."* + *"Does this screen correspond to a future step in the task list?"* If yes, jump ahead — intermediate steps are auto-skipped. (Bounded number of yes/no calls.)
+- **Halt** — Tier 2/3 unable to recover; legacy halt path runs.
+
+This addresses the common failure mode where a step like `PRESS [enter] to open Chrome` fires while Chrome is already open from a previous step — the agent now detects the goal is achieved and moves on instead of halting.
+
+Manual hint per step:
+
+```
+[skippable] press enter to confirm
+```
+
+`[skippable]` runs ONLY the Tier 2 question 1 BEFORE the planner fires, saving a planning + replan budget. If the goal is already visible the step is skipped immediately.
+
+Configuration:
+
+- `SMART_SKIP=on|off` (default `on`)
+- `SMART_SKIP_MAX_TIER=1|2|3` (default `3`) — clamps how aggressive the escalation gets. `1` disables both tiers (legacy halt-on-failure).
+
 ### Conditional logic (IF / ELSE / END_IF / WAIT_UNTIL)
 
 Two new directives let a tasks file branch on what's currently visible on screen:

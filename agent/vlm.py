@@ -681,6 +681,15 @@ class GeminiClient:
             response_mime_type="application/json",
             response_schema=ExtractResponseModel,
         )
+        self._describe_config = types.GenerateContentConfig(
+            system_instruction=(
+                "You are a screen description assistant for a desktop "
+                "automation agent. Describe screenshots concisely and "
+                "factually in plain English. Do NOT use VERDICT: prefixes "
+                "or any structured format — write a single natural-language "
+                "sentence."
+            ),
+        )
         log.info(
             "Initialized Gemini client with model=%s (json_output=%s)",
             model_name,
@@ -925,6 +934,27 @@ class GeminiClient:
         text = (response.text or "").strip()
         log.debug("plan_action response: %r", text)
         return text, None
+
+    def describe_screen(self, screenshot: Image.Image) -> str:
+        """Free-form: ask the VLM to describe the current screen.
+
+        Used by smart step-skip Tier 3 to capture a human-readable
+        snapshot of the screen before deciding whether to auto-skip
+        or jump. Best-effort: returns an empty string on transport
+        errors (the diagnosis caller treats it as advisory).
+        """
+        prompt = (
+            "Describe the current screen in ONE concise sentence. "
+            "Focus on the active app, the visible page/title, and "
+            "the most prominent content or controls. Do NOT speculate "
+            "about what the user wants to do — only describe what is "
+            "actually visible."
+        )
+        response = self._generate(
+            "describe_screen", [prompt, screenshot], self._describe_config
+        )
+        text = (response.text or "").strip()
+        return text
 
     def check_condition(self, condition_text: str, screenshot: Image.Image) -> bool:
         """Yes/no check: is ``condition_text`` visibly true on this screen?

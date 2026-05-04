@@ -121,6 +121,40 @@ def test_classify_and_match_returns_none_when_no_step_matches():
     assert matched is None
 
 
+def test_classify_and_match_skips_excluded_indices():
+    """Devin Review fix: indices listed in ``excluded_indices`` must
+    NOT be selected as the jump target even when they would visually
+    match. The agent loop excludes steps inside an unentered IF
+    block — jumping there would skip the if_begin and corrupt
+    ``branch_decisions``.
+    """
+    # Step 2 would visually match — but it's "excluded" (e.g. inside
+    # an unentered IF block). Step 4 also matches — that should win.
+    vlm = FakeVLM(conditions=[("type query", True), ("click submit", True)])
+    description, matched = classify_and_match(
+        vlm,
+        ["open chrome", "type query", "wait", "click submit"],
+        current_idx=1,
+        screenshot=_img(),
+        excluded_indices={2},
+    )
+    assert matched == 4
+
+
+def test_classify_and_match_returns_none_when_only_match_is_excluded():
+    """If every visually-matching step is excluded, return None
+    (caller falls back to the legacy halt path)."""
+    vlm = FakeVLM(conditions=[("type query", True)])
+    description, matched = classify_and_match(
+        vlm,
+        ["open chrome", "type query", "click submit"],
+        current_idx=1,
+        screenshot=_img(),
+        excluded_indices={2},
+    )
+    assert matched is None
+
+
 def test_classify_and_match_starts_search_from_current_idx_not_step_one():
     """Past-step regressions must not be returned even when the prompt
     text would otherwise match."""

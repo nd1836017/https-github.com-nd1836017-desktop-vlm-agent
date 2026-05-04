@@ -152,6 +152,8 @@ def classify_and_match(
     step_texts: list[str],
     current_idx: int,
     screenshot: Image,
+    *,
+    excluded_indices: set[int] | None = None,
 ) -> tuple[str, int | None]:
     """Tier-3: ask the VLM what the screen is and which step matches.
 
@@ -168,7 +170,17 @@ def classify_and_match(
     ``[current_idx, len(step_texts)]`` because matching a *past* step
     is almost always a sign of confusion (the agent has already moved
     forward), and we never want to silently regress.
+
+    ``excluded_indices`` (1-indexed) names steps that MUST NOT be
+    selected as the jump target. The agent loop populates this with
+    indices that live inside an IF block whose ``if_begin`` we
+    haven't yet executed: jumping there would skip the if_begin and
+    leave ``branch_decisions`` un-populated, causing both branches
+    to run unconditionally. Excluded indices are still checked
+    visually so the description is correct, but we never *return*
+    one as the match.
     """
+    excluded = excluded_indices or set()
     # Step 1: free-form description (used purely for logs / artifact
     # bundles — not parsed). We don't need the model's exact wording;
     # we just want to capture it for human review when we do skip.
@@ -182,6 +194,9 @@ def classify_and_match(
     # the first match — the run loop wants the *earliest* matching
     # step, not the last.
     for candidate_idx in range(current_idx, len(step_texts) + 1):
+        if candidate_idx in excluded:
+            # Inside an unentered IF block — never a safe jump target.
+            continue
         step_text = step_texts[candidate_idx - 1]
         framed = (
             f"the current screen most plausibly corresponds to the step "
@@ -225,6 +240,7 @@ def diagnose_step_failure(
     screenshot: Image,
     *,
     max_tier: int = 3,
+    excluded_indices: set[int] | None = None,
 ) -> SkipDecision:
     """Run the 2-tier escalation. ``current_idx`` is 1-indexed.
 
@@ -261,7 +277,8 @@ def diagnose_step_failure(
 
     # Tier 3 — open-ended classify and match.
     description, matched_idx = classify_and_match(
-        vlm, step_texts, current_idx, screenshot
+        vlm, step_texts, current_idx, screenshot,
+        excluded_indices=excluded_indices,
     )
     if matched_idx is None:
         # No future step matches. Try the off-track check to decide

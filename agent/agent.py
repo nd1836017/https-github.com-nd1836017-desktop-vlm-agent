@@ -1766,12 +1766,45 @@ def run(
                 ):
                     try:
                         post_image = capture_screenshot()
+                        # Exclude steps inside an IF block we haven't
+                        # yet entered as Tier-3 jump targets. Jumping
+                        # there would skip the if_begin and leave
+                        # ``branch_decisions[block_id]`` un-populated,
+                        # causing both branches of the IF to execute
+                        # unconditionally (Devin Review finding on PR
+                        # #28). A step is "inside an unentered block"
+                        # when its ``active_block_id`` is set AND that
+                        # block_id is not yet a key in
+                        # ``branch_decisions``. We only consider
+                        # candidates >= current idx because earlier
+                        # steps are already excluded by the search
+                        # window. (Steps inside an already-entered
+                        # block remain valid jump targets only when
+                        # their branch matches the recorded decision;
+                        # we exclude the wrong-branch siblings too.)
+                        excluded: set[int] = set()
+                        for cand_idx in range(idx, len(steps) + 1):
+                            cand = steps[cand_idx - 1]
+                            if cand.active_block_id is None:
+                                continue
+                            recorded = branch_decisions.get(cand.active_block_id)
+                            if recorded is None:
+                                # block not yet entered — never jump in
+                                excluded.add(cand_idx)
+                                continue
+                            # block already decided — exclude only if
+                            # the candidate's branch is the non-taken one.
+                            in_then = cand.branch == "then"
+                            in_else = cand.branch == "else"
+                            if (in_then and not recorded) or (in_else and recorded):
+                                excluded.add(cand_idx)
                         skip_decision = diagnose_step_failure(
                             vlm,
                             [s.text for s in steps],
                             current_idx=idx,
                             screenshot=post_image,
                             max_tier=config.smart_skip_max_tier,
+                            excluded_indices=excluded,
                         )
                     except Exception as exc:  # noqa: BLE001
                         log.warning(

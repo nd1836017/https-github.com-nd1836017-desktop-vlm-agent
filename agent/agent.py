@@ -57,6 +57,11 @@ from .screen import (
     detect_geometry,
     image_signature,
 )
+from .skip_diagnosis import (
+    SkipDecision,
+    diagnose_already_done,
+    diagnose_step_failure,
+)
 from .state import AgentState, load_state, save_state
 from .task_decomposer import (
     apply_decomposer,
@@ -74,6 +79,7 @@ from .task_router import (
 from .tasks_loader import (
     TasksLoadError,
     TaskStep,
+    apply_skill_auto_use,
     attach_routing_hints,
     load_steps,
     load_tasks,
@@ -1371,6 +1377,19 @@ def run(
         client=vlm,
     )
 
+    # Skill auto-use: scans every step against ``# TRIGGERS:`` keyword
+    # lists declared in skill files and replaces matched steps with the
+    # corresponding skill's contents. Runs AFTER decomposition so a
+    # compound goal like "play X on yt" gets split first, then the
+    # ``open youtube`` substep matches the ``open_youtube`` skill's
+    # ``yt`` trigger. Falls back to the unchanged step list when
+    # ``SKILL_AUTO_USE=off`` or when no skill declares triggers.
+    steps = apply_skill_auto_use(
+        steps,
+        skills_dir=config.skills_dir,
+        enabled=config.skill_auto_use_enabled,
+    )
+
     # Checkpoint handling — runs against the POST-decomposition step
     # count so a previous run's saved total_steps lines up.
     existing_state = load_state(config.state_file) if resume else None
@@ -1498,11 +1517,50 @@ def run(
     # counter so total_steps math (checkpoints, "x/N") stays consistent.
     branch_decisions: dict[int, bool] = {}
 
+    # Smart step-skip cursor: when smart-skip Tier-3 returns a
+    # ``jump_to(target)`` decision, we set ``skip_until_idx = target``
+    # and let intermediate iterations record synthetic PASSes (so the
+    # checkpoint advances correctly and the run summary shows what was
+    # auto-skipped). The cursor is reset whenever ``idx >= skip_until_idx``.
+    skip_until_idx: int = 0
+
     success = False
     try:
         for idx in range(start_idx, len(steps) + 1):
             task_step: TaskStep = steps[idx - 1]
             step_text = task_step.text
+
+            # Smart-skip jump cursor: handle steps that were already
+            # determined to be no-ops by a Tier-3 jump_to decision in
+            # an earlier iteration. Record a synthetic PASS, advance
+            # state, and continue. We do this BEFORE variable
+            # substitution so an unresolved {{var.x}} on a skipped
+            # step doesn't halt the run.
+            if idx < skip_until_idx:
+                reason = (
+                    f"auto-skipped (smart-skip Tier 3 jumped to step "
+                    f"{skip_until_idx})"
+                )
+                log.info("Step %d/%d: %s", idx, len(steps), reason)
+                artifact_writer.append_summary(
+                    step_idx=idx,
+                    step_text=step_text,
+                    passed=True,
+                    reason=reason,
+                )
+                state = state.advance()
+                if variables is not None:
+                    state = state.with_variables(variables.to_dict())
+                try:
+                    save_state(config.state_file, state)
+                except OSError as exc:
+                    log.warning(
+                        "Failed to save checkpoint to %s: %s",
+                        config.state_file,
+                        exc,
+                    )
+                continue
+
             # Substitute ``{{var.<name>}}`` placeholders just before
             # running the step, NOT at load time — variables are populated
             # as the run progresses, and a step further down may reference
@@ -1596,6 +1654,53 @@ def run(
                     )
                 continue
 
+            # Manual ``[skippable]`` preflight check: when the user has
+            # marked this step as commonly-redundant (e.g. dismissing a
+            # cookie banner that's not always shown), peek at the
+            # current screen and ask the VLM "is the goal already
+            # done?". If yes, record a synthetic PASS and advance —
+            # saving the planner / replan budget that would otherwise
+            # be burned chasing a no-op. Gated on ``smart_skip_enabled``
+            # so the legacy mode is bit-for-bit unchanged.
+            if (
+                task_step.skippable
+                and config.smart_skip_enabled
+                and config.smart_skip_max_tier >= 2
+            ):
+                try:
+                    preflight_image = capture_screenshot()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "smart-skip [skippable] preflight: capture failed (%s); "
+                        "running step normally.",
+                        exc,
+                    )
+                else:
+                    if diagnose_already_done(vlm, step_text, preflight_image):
+                        reason = (
+                            "[skippable] preflight: goal already on screen; "
+                            "skipping without invoking planner"
+                        )
+                        log.info("Step %d/%d: %s", idx, len(steps), reason)
+                        artifact_writer.append_summary(
+                            step_idx=idx,
+                            step_text=step_text,
+                            passed=True,
+                            reason=reason,
+                        )
+                        state = state.advance()
+                        if variables is not None:
+                            state = state.with_variables(variables.to_dict())
+                        try:
+                            save_state(config.state_file, state)
+                        except OSError as save_exc:
+                            log.warning(
+                                "Failed to save checkpoint to %s: %s",
+                                config.state_file,
+                                save_exc,
+                            )
+                        continue
+
             # Routing hint is per-step and frozen at run start; pass the
             # rendered string so the planner sees it embedded in its
             # user prompt. Empty string when no hint is attached.
@@ -1643,6 +1748,95 @@ def run(
             )
 
             if not result.passed:
+                # Smart step-skip escalation: instead of halting
+                # immediately on replan-budget exhaustion, capture the
+                # current screen and ask the VLM:
+                #   Tier 2 — is the step's goal already done? (one
+                #             yes/no call; if yes, skip the step.)
+                #   Tier 3 — open-ended classify + match-to-step
+                #             (multiple yes/no calls; skip / jump
+                #             ahead / halt as appropriate).
+                # Always advisory — any VLM error falls through to the
+                # legacy halt below. Disabled when ``SMART_SKIP=off`` or
+                # ``SMART_SKIP_MAX_TIER<2``.
+                skip_decision: SkipDecision | None = None
+                if (
+                    config.smart_skip_enabled
+                    and config.smart_skip_max_tier >= 2
+                ):
+                    try:
+                        post_image = capture_screenshot()
+                        skip_decision = diagnose_step_failure(
+                            vlm,
+                            [s.text for s in steps],
+                            current_idx=idx,
+                            screenshot=post_image,
+                            max_tier=config.smart_skip_max_tier,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "smart-skip diagnosis raised %s; falling through to halt.",
+                            exc,
+                        )
+                        skip_decision = None
+
+                if skip_decision is not None:
+                    if skip_decision.kind == "skip_current":
+                        log.info(
+                            "smart-skip resolved step %d FAIL via skip_current: %s",
+                            idx,
+                            skip_decision.reason,
+                        )
+                        artifact_writer.append_summary(
+                            step_idx=idx,
+                            step_text=step_text,
+                            passed=True,
+                            reason=f"smart-skip: {skip_decision.reason}",
+                        )
+                        state = state.advance()
+                        if variables is not None:
+                            state = state.with_variables(variables.to_dict())
+                        try:
+                            save_state(config.state_file, state)
+                        except OSError as save_exc:
+                            log.warning(
+                                "Failed to save checkpoint to %s: %s",
+                                config.state_file,
+                                save_exc,
+                            )
+                        continue
+                    if skip_decision.kind == "jump_to" and skip_decision.target_idx:
+                        target = skip_decision.target_idx
+                        log.info(
+                            "smart-skip resolved step %d FAIL via jump_to(%d): %s",
+                            idx,
+                            target,
+                            skip_decision.reason,
+                        )
+                        artifact_writer.append_summary(
+                            step_idx=idx,
+                            step_text=step_text,
+                            passed=True,
+                            reason=f"smart-skip: {skip_decision.reason}",
+                        )
+                        state = state.advance()
+                        if variables is not None:
+                            state = state.with_variables(variables.to_dict())
+                        try:
+                            save_state(config.state_file, state)
+                        except OSError as save_exc:
+                            log.warning(
+                                "Failed to save checkpoint to %s: %s",
+                                config.state_file,
+                                save_exc,
+                            )
+                        skip_until_idx = target
+                        continue
+                    # ``halt`` and ``continue`` decisions both fall
+                    # through to the legacy halt path below — the
+                    # difference is logged but the run-loop behaviour
+                    # is the same: stop and prompt the user to fix.
+
                 msg = (
                     f"\n[!] HALT at step {idx}/{len(steps)}: {step_text}\n"
                     f"    Reason: {result.reason}\n"

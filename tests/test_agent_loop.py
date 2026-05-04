@@ -139,6 +139,9 @@ def _cfg(tmp_path, tasks_text: str, **overrides) -> Config:
         skills_dir=None,
         wait_until_timeout_seconds=30.0,
         wait_until_poll_seconds=2.0,
+        smart_skip_enabled=False,
+        smart_skip_max_tier=3,
+        skill_auto_use_enabled=False,
     )
     defaults.update(overrides)
     return Config(**defaults)

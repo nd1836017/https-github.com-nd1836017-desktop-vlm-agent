@@ -324,7 +324,7 @@ _CLICK_RE = re.compile(
     re.IGNORECASE,
 )
 _PRESS_RE = re.compile(r"PRESS\s*\[\s*([^\]\n]+?)\s*\]", re.IGNORECASE)
-_TYPE_RE = re.compile(r"TYPE\s*\[\s*(.*?)\s*\]", re.IGNORECASE)
+_TYPE_RE = re.compile(r"TYPE\s*\[\s*(.*?)\s*\]", re.IGNORECASE | re.DOTALL)
 _SCROLL_RE = re.compile(
     r"SCROLL\s*\[\s*(up|down|UP|DOWN)\s*,\s*(-?\d+)\s*\]",
     re.IGNORECASE,

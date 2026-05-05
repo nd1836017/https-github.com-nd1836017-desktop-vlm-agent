@@ -254,6 +254,30 @@ class BrowserBridge:
             f"BROWSER_FILL [{selector}] — unexpected result {value_kind!r}",
         )
 
+    def click_chrome_profile(self, name: str) -> tuple[bool, str]:
+        """Click the Chrome profile-picker card whose label matches ``name``.
+
+        Thin wrapper around :func:`agent.profile_picker.click_profile_by_label`
+        — exposed here so callers that already hold a ``BrowserBridge``
+        don't need to reach into a separate module. Returns
+        ``(ok, message)`` matching the rest of this class's API.
+
+        The label match is unicode-aware, case-insensitive, and tolerant
+        of internal whitespace (see ``profile_picker.normalize_profile_label``).
+        Falls back to a single substring match when no exact normalised
+        hit is found.
+
+        Returns ``(False, ...)`` — without raising — when the bridge
+        isn't connected, the active tab isn't ``chrome://profile-picker/``,
+        the walker finds zero cards, or no card label matches. The
+        caller should fall back to the visual click path on failure.
+        """
+        # Imported here (not at module top) to avoid an import cycle:
+        # agent.profile_picker imports BrowserBridge for type hints.
+        from agent.profile_picker import click_profile_by_label
+
+        return click_profile_by_label(self, name)
+
     # ----------------------------------------------------------------- private
 
     def _discover_active_target(self) -> _CdpTarget:

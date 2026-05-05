@@ -49,6 +49,13 @@ from .parser import (
     TypeCommand,
     parse_command,
 )
+from .run_memory import (
+    RunMemoryEntry,
+    RunMemoryStore,
+    compute_signature,
+    format_prior_run_hint,
+    summarize_run_actions,
+)
 from .screen import (
     ScreenGeometry,
     annotate_candidates,
@@ -639,6 +646,7 @@ def _attempt_step(
     variables: VariableStore | None = None,
     browser_bridge: BrowserBridge | None = None,
     routing_hint: str = "",
+    prior_run_hint: str = "",
 ) -> tuple[VerificationResult | PauseRequested, str]:
     """Run one plan/execute/verify attempt and return (verdict, action_text).
 
@@ -673,6 +681,7 @@ def _attempt_step(
             previous_failure=previous_failure,
             extra_images=extra_images,
             routing_hint=routing_hint,
+            prior_run_hint=prior_run_hint,
         )
         if cmd is None:
             # JSON-mode failed or disabled — fall back to regex parse.
@@ -969,6 +978,7 @@ def run_step(
     stuck_step_threshold: int = 0,
     browser_bridge: BrowserBridge | None = None,
     routing_hint: str = "",
+    prior_run_hint: str = "",
 ) -> VerificationResult:
     """Run one step with up to `max_replans` replans on verify FAIL.
 
@@ -1106,6 +1116,7 @@ def run_step(
             variables=variables,
             browser_bridge=browser_bridge,
             routing_hint=routing_hint,
+            prior_run_hint=prior_run_hint,
         )
 
         # PAUSE: ask the human, then loop back without consuming the
@@ -1511,6 +1522,46 @@ def run(
         start_idx,
     )
 
+    # Run memory: load past successful runs for this task signature
+    # and seed the planner with a hint summarising what worked. The
+    # signature is derived from the *post-decomposition* step text
+    # so cosmetic tasks-file edits still hit the cache, but a real
+    # change to the task list (different goal) misses cleanly.
+    # Recorded action_texts accumulate as we go and are summarised
+    # at end-of-run (success only). Disabled when RUN_MEMORY=off
+    # OR when ``compute_signature`` returns "" (empty / blank task list).
+    run_memory_store: RunMemoryStore | None = None
+    run_memory_signature: str = ""
+    prior_run_hint: str = ""
+    recorded_actions: list[str] = []
+    if config.run_memory_enabled:
+        run_memory_store = RunMemoryStore(
+            config.run_memory_dir / "run_memory.json",
+            max_per_signature=config.run_memory_max_per_signature,
+            max_age_days=config.run_memory_max_age_days,
+        )
+        try:
+            run_memory_store.load()
+        except OSError as exc:
+            log.warning("run_memory: load failed (%s); starting empty.", exc)
+        run_memory_signature = compute_signature([s.text for s in steps])
+        if run_memory_signature:
+            entry = run_memory_store.latest(run_memory_signature)
+            if entry is not None:
+                prior_run_hint = format_prior_run_hint(entry)
+                log.info(
+                    "run_memory: matched prior run for signature %s "
+                    "(recorded %.1fd ago, %d actions); seeding planner.",
+                    run_memory_signature[:8],
+                    entry.age_days(),
+                    len(entry.actions),
+                )
+            else:
+                log.info(
+                    "run_memory: no prior run for signature %s.",
+                    run_memory_signature[:8],
+                )
+
     # Track which side of each IF block was taken. Built up as if_begin
     # steps run; consulted by every step inside the block to decide
     # whether to execute or skip. Skipped steps still tick the step
@@ -1735,6 +1786,7 @@ def run(
                 stuck_step_threshold=config.stuck_step_threshold,
                 browser_bridge=browser_bridge,
                 routing_hint=hint_text,
+                prior_run_hint=prior_run_hint,
                 pause_handler=pause_handler,
             )
 
@@ -1754,6 +1806,16 @@ def run(
                     passed=True,
                     reason=result.reason,
                 )
+                # Run-memory: capture each PASSed step's action_text
+                # for end-of-run summarisation. Reuse the writer's
+                # in-memory ``_last_action_by_step`` map — populated
+                # by ``save_plan`` regardless of whether artifacts are
+                # written to disk. Falls back to a synthetic marker
+                # so empty entries don't poison the summariser.
+                action_text = artifact_writer._last_action_by_step.get(
+                    idx, "<no-action-recorded>"
+                )
+                recorded_actions.append(action_text)
 
             if not result.passed:
                 # Smart step-skip escalation: instead of halting
@@ -1922,6 +1984,48 @@ def run(
         log.info("All %d step(s) completed successfully.", len(steps))
         print(f"[ok] All {len(steps)} step(s) completed successfully.")
         success = True
+        # Run-memory: condense the action log into a hint and persist
+        # it for the next run. ONLY runs on success — we don't want to
+        # remember a broken path. Failures fall through and the prior
+        # entry (if any) stays unchanged. Wrapped in try/except so a
+        # disk / VLM hiccup at the very end of an otherwise successful
+        # run doesn't flip the return code.
+        if (
+            run_memory_store is not None
+            and run_memory_signature
+            and recorded_actions
+        ):
+            try:
+                summary_text = summarize_run_actions(
+                    client=vlm,
+                    tasks=[s.text for s in steps],
+                    actions=recorded_actions,
+                )
+                entry = RunMemoryEntry(
+                    signature=run_memory_signature,
+                    tasks_normalised=[
+                        s.text.strip() for s in steps if s.text.strip()
+                    ],
+                    summary=summary_text,
+                    actions=list(recorded_actions),
+                    step_count=len(steps),
+                    recorded_at=time.time(),
+                    run_id="",
+                )
+                run_memory_store.record(entry)
+                run_memory_store.save()
+                log.info(
+                    "run_memory: recorded successful run "
+                    "(signature=%s, %d actions, summary=%d chars).",
+                    run_memory_signature[:8],
+                    len(recorded_actions),
+                    len(summary_text),
+                )
+            except (OSError, ValueError) as exc:
+                log.warning(
+                    "run_memory: failed to record successful run: %s",
+                    exc,
+                )
         return 0
     finally:
         # Workspace cleanup is the last thing we do — temp dirs are wiped on

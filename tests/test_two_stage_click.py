@@ -144,6 +144,7 @@ class TwoStageFakeClient:
         previous_failure="",
         extra_images=None,
         routing_hint="",
+        prior_run_hint="",
     ):
         self.plan_calls.append({"step": step})
         out = self._plan_outputs.pop(0)

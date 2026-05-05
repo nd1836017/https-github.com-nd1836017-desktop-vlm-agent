@@ -56,6 +56,7 @@ class _FakeClient:
         previous_failure="",
         extra_images=None,
         routing_hint="",
+        prior_run_hint="",
     ):
         self.plan_calls += 1
         self.plan_screenshots.append(screenshot)

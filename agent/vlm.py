@@ -690,6 +690,20 @@ class GeminiClient:
                 "sentence."
             ),
         )
+        # Run-memory summariser: a tight system prompt that nudges
+        # the model toward postmortem-style hints for the *next* run
+        # rather than verbose play-by-play. Used by
+        # ``GeminiClient.summarize_text`` and reused for any other
+        # short text-generation utility we add later.
+        self._summarize_config = types.GenerateContentConfig(
+            system_instruction=(
+                "You are summarising a successful automation run so a "
+                "future run with the same goal can be seeded with "
+                "what worked. Reply with a single short paragraph. "
+                "Be concrete about element labels and key presses; "
+                "skip pixel coordinates. No preamble, no JSON, no quotes."
+            ),
+        )
         log.info(
             "Initialized Gemini client with model=%s (json_output=%s)",
             model_name,
@@ -761,6 +775,7 @@ class GeminiClient:
         previous_failure: str = "",
         extra_images: list[bytes] | None = None,
         routing_hint: str = "",
+        prior_run_hint: str = "",
     ) -> tuple[str, Command | None]:
         """Ask the VLM what action to take for the given step.
 
@@ -807,6 +822,16 @@ class GeminiClient:
             parts.append(
                 "Smart-router hint (advisory; override if the screen "
                 f"disagrees): {routing_hint}"
+            )
+        if prior_run_hint:
+            # Run-memory: a previous successful run with this same task
+            # signature wrote a postmortem hint. Inject it as advisory
+            # context — same caveat as routing_hint, the screen always
+            # wins. The hint is shared by every step in the run since
+            # it summarises the whole goal, not a single substep.
+            parts.append(
+                "Prior-run hint (advisory; the current screen always "
+                f"wins): {prior_run_hint}"
             )
         parts.append(f"Current step: {step}")
 
@@ -953,6 +978,26 @@ class GeminiClient:
         response = self._generate(
             "describe_screen", [prompt, screenshot], self._describe_config
         )
+        text = (response.text or "").strip()
+        return text
+
+    def summarize_text(self, prompt: str) -> str:
+        """Text-only summary call. Used by run-memory at end-of-run.
+
+        No screenshot, no JSON schema. Caller wraps any failure modes
+        — this method just returns the model's stripped text or empty
+        string on transport error. Run-memory falls back to a
+        deterministic action-list summary in that case.
+        """
+        if not prompt:
+            return ""
+        try:
+            response = self._generate(
+                "summarize_run", [prompt], self._summarize_config
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            log.warning("summarize_text: generate failed: %s", exc)
+            return ""
         text = (response.text or "").strip()
         return text
 

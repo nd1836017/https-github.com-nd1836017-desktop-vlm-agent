@@ -105,6 +105,20 @@ class Config:
     # always processed first. Set ``SKILL_AUTO_USE=off`` to disable
     # auto-detection (manual USE remains available).
     skill_auto_use_enabled: bool
+    # Run memory (self-correction across runs). When ``run_memory_enabled``
+    # is True, after a SUCCESSFUL run the agent summarises what worked
+    # and saves a hint under a signature derived from the tasks-file
+    # content. On the next run with the same signature, the planner is
+    # seeded with that hint via ``plan_action(prior_run_hint=...)`` so
+    # repeat runs become more reliable. Disabled with ``RUN_MEMORY=off``.
+    # ``run_memory_dir`` is the directory holding the JSON store
+    # (default ``memory/`` next to ``tasks.txt``). ``max_per_signature``
+    # caps how many entries we keep per task; ``max_age_days`` evicts
+    # old entries on load.
+    run_memory_enabled: bool
+    run_memory_dir: Path
+    run_memory_max_per_signature: int
+    run_memory_max_age_days: float
 
     @classmethod
     def load(cls) -> Config:
@@ -184,6 +198,16 @@ class Config:
                 1, min(3, int(os.getenv("SMART_SKIP_MAX_TIER", "3")))
             ),
             skill_auto_use_enabled=_env_bool("SKILL_AUTO_USE", default=True),
+            run_memory_enabled=_env_bool("RUN_MEMORY", default=True),
+            run_memory_dir=Path(
+                os.getenv("RUN_MEMORY_DIR", "memory")
+            ).expanduser(),
+            run_memory_max_per_signature=max(
+                1, int(os.getenv("RUN_MEMORY_MAX_PER_SIGNATURE", "3"))
+            ),
+            run_memory_max_age_days=max(
+                0.0, float(os.getenv("RUN_MEMORY_MAX_AGE_DAYS", "30"))
+            ),
         )
         if cfg.rpd_warn_threshold >= cfg.rpd_halt_threshold:
             raise ValueError(

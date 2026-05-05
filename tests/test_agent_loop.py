@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import replace as dataclasses_replace
+from pathlib import Path
 from typing import cast
 from unittest import mock
 
@@ -40,6 +41,7 @@ class FakeClient:
         previous_failure: str = "",
         extra_images=None,
         routing_hint: str = "",
+        prior_run_hint: str = "",
     ):
         self.plan_calls.append(
             {
@@ -142,6 +144,10 @@ def _cfg(tmp_path, tasks_text: str, **overrides) -> Config:
         smart_skip_enabled=False,
         smart_skip_max_tier=3,
         skill_auto_use_enabled=False,
+        run_memory_enabled=False,
+        run_memory_dir=Path("memory"),
+        run_memory_max_per_signature=3,
+        run_memory_max_age_days=30.0,
     )
     defaults.update(overrides)
     return Config(**defaults)

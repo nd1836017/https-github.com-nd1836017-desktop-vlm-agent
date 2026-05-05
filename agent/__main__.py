@@ -147,11 +147,76 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "file with the same name. No effect on its own."
         ),
     )
+    # Run-memory inspection helpers — short-circuit the run loop so
+    # they work even when GEMINI_API_KEY isn't set.
+    p.add_argument(
+        "--list-memory",
+        action="store_true",
+        help=(
+            "List every saved run-memory entry under RUN_MEMORY_DIR "
+            "(with task signature, age, summary preview) and exit."
+        ),
+    )
+    p.add_argument(
+        "--clear-memory",
+        action="store_true",
+        help=(
+            "Wipe every saved run-memory entry under RUN_MEMORY_DIR "
+            "and exit. Cannot be undone."
+        ),
+    )
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+
+    # Run-memory helpers run BEFORE Config.load() — they only need
+    # RUN_MEMORY_DIR (or its default ./memory/) and a working JSON
+    # store. Lets the user inspect / clear memory without an API key
+    # configured.
+    if args.list_memory or args.clear_memory:
+        import os
+
+        from .run_memory import RunMemoryStore
+
+        memory_dir = Path(os.getenv("RUN_MEMORY_DIR", "memory")).expanduser()
+        store_path = memory_dir / "run_memory.json"
+        store = RunMemoryStore(store_path)
+        store.load()
+        if args.clear_memory:
+            store.clear()
+            try:
+                store.save()
+            except OSError as exc:
+                print(f"[memory error] could not write {store_path}: {exc}", file=sys.stderr)
+                return 2
+            print(f"Cleared all run-memory entries at {store_path}.")
+            return 0
+        # --list-memory
+        entries = store.all_entries()
+        if not entries:
+            print(
+                f"No run-memory entries at {store_path}. "
+                f"Successful runs will record entries here automatically."
+            )
+            return 0
+        print(f"Run-memory entries at {store_path}:")
+        # Newest first.
+        for e in sorted(entries, key=lambda x: x.recorded_at, reverse=True):
+            age = e.age_days()
+            when = (
+                f"{age:.1f}d ago" if age >= 1 else
+                f"{age * 24:.1f}h ago" if age * 24 >= 1 else
+                "just now"
+            )
+            preview = e.summary if len(e.summary) <= 80 else e.summary[:77] + "..."
+            print(
+                f"  signature={e.signature[:8]}  steps={e.step_count}  "
+                f"actions={len(e.actions)}  recorded={when}\n"
+                f"    summary: {preview}"
+            )
+        return 0
 
     # Skill helpers run BEFORE Config.load() so they work without a
     # configured GEMINI_API_KEY. They only need SKILLS_DIR (or its
